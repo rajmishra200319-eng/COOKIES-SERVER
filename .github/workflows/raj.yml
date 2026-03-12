@@ -1,0 +1,284 @@
+name: RAJ MESSENGER 24/7
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"    # सिर्फ एक CRON - हर 15 मिनट
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  messaging:
+    name: 🔄 RAJ Messenger
+    runs-on: ubuntu-latest
+    
+    # 17 min ke baad old run auto delete ho jayega
+    timeout-minutes: 17
+    
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+      
+      - name: 🔧 Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: 📦 Install Dependencies
+        run: |
+          npm install
+          # package-lock.json बनाओ अगर नहीं है
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only
+          fi
+      
+      - name: 📁 Create Files from Secrets
+        run: |
+          mkdir -p sessions
+          
+          # Secrets से files बनाओ (base64 decode के साथ)
+          if [ -n "${{ secrets.COOKIES }}" ]; then
+            echo "${{ secrets.COOKIES }}" | base64 -d > cookies.txt 2>/dev/null || echo "${{ secrets.COOKIES }}" > cookies.txt
+            echo "✅ cookies.txt created"
+          fi
+          
+          if [ -n "${{ secrets.CONVO }}" ]; then
+            echo "${{ secrets.CONVO }}" | base64 -d > convo.txt 2>/dev/null || echo "${{ secrets.CONVO }}" > convo.txt
+            echo "✅ convo.txt created"
+          fi
+          
+          if [ -n "${{ secrets.MESSAGES }}" ]; then
+            echo "${{ secrets.MESSAGES }}" | base64 -d > File.txt 2>/dev/null || echo "${{ secrets.MESSAGES }}" > File.txt
+            echo "✅ File.txt created"
+          fi
+          
+          if [ -n "${{ secrets.HATERS }}" ]; then
+            echo "${{ secrets.HATERS }}" | base64 -d > hatersname.txt 2>/dev/null || echo "${{ secrets.HATERS }}" > hatersname.txt
+            echo "✅ hatersname.txt created"
+          fi
+          
+          if [ -n "${{ secrets.LASTNAME }}" ]; then
+            echo "${{ secrets.LASTNAME }}" | base64 -d > lastname.txt 2>/dev/null || echo "${{ secrets.LASTNAME }}" > lastname.txt
+            echo "✅ lastname.txt created"
+          fi
+          
+          # time.txt - default 0
+          echo "0" > time.txt
+          echo "✅ time.txt created"
+          
+          echo ""
+          echo "📊 Files Status:"
+          ls -la *.txt || echo "No text files"
+      
+      - name: 💾 Restore Session Cache
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: sessions/
+          key: raj-messenger-${{ github.run_id }}
+          restore-keys: |
+            raj-messenger-
+      
+      - name: 🚀 Start with AUTO RESTART
+        run: |
+          # AUTO RESTART SCRIPT - ये कभी नहीं रुकेगा
+          cat > auto-run.sh << 'EOF'
+          #!/bin/bash
+          
+          SESSION_ID=""
+          TOTAL_MSGS=0
+          RESTART_COUNT=0
+          
+          echo "════════════════════════════════════════════"
+          echo "🤖 RAJ MESSENGER STARTED at $(date)"
+          echo "════════════════════════════════════════════"
+          
+          while true; do
+            RESTART_COUNT=$((RESTART_COUNT + 1))
+            
+            echo ""
+            echo "════════════════════════════════════════════"
+            echo "🔄 RESTART #$RESTART_COUNT at $(date)"
+            echo "════════════════════════════════════════════"
+            
+            # पुराने process को kill करो
+            pkill -f "node index.js" 2>/dev/null || true
+            sleep 3
+            
+            # नया process start
+            echo "▶️ Starting index.js..."
+            node index.js &
+            SERVER_PID=$!
+            echo "✅ Server PID: $SERVER_PID"
+            
+            # Wait for server to start
+            echo "⏳ Waiting for server to start..."
+            sleep 10
+            
+            # Health check with retry
+            HEALTHY=0
+            for i in {1..5}; do
+              if curl -s -f http://localhost:4000/health > /dev/null 2>&1; then
+                echo "✅ Health check passed"
+                HEALTHY=1
+                break
+              else
+                echo "⏳ Waiting for server... ($i/5)"
+                sleep 2
+              fi
+            done
+            
+            if [ $HEALTHY -eq 0 ]; then
+              echo "❌ Server failed to start"
+              kill $SERVER_PID 2>/dev/null || true
+              echo "🔄 Restarting in 10 seconds..."
+              sleep 10
+              continue
+            fi
+            
+            # Start messaging if needed
+            if [ -z "$SESSION_ID" ]; then
+              echo "📤 Starting messaging session..."
+              RESPONSE=$(curl -s -X POST http://localhost:4000/start \
+                -H "Content-Type: application/json" \
+                -d '{}' 2>/dev/null)
+              
+              SESSION_ID=$(echo $RESPONSE | grep -o '"sessionId":"[^"]*"' | cut -d'"' -f4)
+              
+              if [ -n "$SESSION_ID" ]; then
+                echo "✅ Session ID: $SESSION_ID"
+                echo $SESSION_ID > session_id.txt
+              else
+                echo "⚠️ Could not get session ID"
+              fi
+            fi
+            
+            echo ""
+            echo "📊 Monitoring - Auto restart on error"
+            echo "────────────────────────────────────────────"
+            
+            # Monitor loop
+            while true; do
+              # Check if process is alive
+              if ! kill -0 $SERVER_PID 2>/dev/null; then
+                echo "❌ Process died at $(date)"
+                break
+              fi
+              
+              # Health check
+              if ! curl -s -f http://localhost:4000/health > /dev/null 2>&1; then
+                echo "❌ Health check failed at $(date)"
+                break
+              fi
+              
+              # Get status (हर 30 सेकंड)
+              CURRENT_SEC=$(( $(date +%s) % 30 ))
+              if [ $CURRENT_SEC -eq 0 ]; then
+                STATUS=$(curl -s -X POST http://localhost:4000/status \
+                  -H "Content-Type: application/json" \
+                  -d "{\"sessionId\":\"$SESSION_ID\"}" 2>/dev/null)
+                
+                NEW_COUNT=$(echo $STATUS | grep -o '"messagesSent":[0-9]*' | cut -d':' -f2)
+                
+                if [ -n "$NEW_COUNT" ] && [ "$NEW_COUNT" -gt "$TOTAL_MSGS" ]; then
+                  TOTAL_MSGS=$NEW_COUNT
+                  echo "$(date) | ✅ Messages: $TOTAL_MSGS"
+                  echo $TOTAL_MSGS > last_count.txt
+                fi
+              fi
+              
+              sleep 5
+            done
+            
+            # यहाँ आए means error हुआ
+            echo ""
+            echo "⚠️ Error detected at $(date)"
+            echo "🔄 Auto-restarting in 10 seconds..."
+            
+            # Cleanup
+            kill $SERVER_PID 2>/dev/null || true
+            pkill -f "node index.js" 2>/dev/null || true
+            sleep 10
+            
+            # Loop continue (AUTO RESTART)
+          done
+          EOF
+          
+          chmod +x auto-run.sh
+          
+          # Start auto-run in background
+          echo "🚀 Starting auto-restart system..."
+          ./auto-run.sh &
+          AUTO_PID=$!
+          
+          echo "✅ Auto-restart running with PID: $AUTO_PID"
+          echo ""
+          echo "⏱️  This job will run for 5 hours 50 minutes..."
+          echo "────────────────────────────────────────────"
+          
+          # 5 घंटे 50 मिनट = 350 minutes = 21000 seconds
+          # थोड़ा कम रखो safety के लिए
+          sleep 20900
+          
+          # Time's up
+          echo ""
+          echo "⏰ 5 hours 50 minutes complete! Shutting down..."
+          
+          # Kill everything
+          kill $AUTO_PID 2>/dev/null || true
+          pkill -f "auto-run.sh" 2>/dev/null || true
+          pkill -f "node index.js" 2>/dev/null || true
+          
+          echo "✅ Job completed. Next run in < 1 minute (CRON: */15)"
+          echo ""
+      
+      - name: 💾 Save Session Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: sessions/
+          key: raj-messenger-${{ github.run_id }}
+        continue-on-error: true
+      
+      - name: 📤 Upload Backup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raj-backup-${{ github.run_id }}
+          path: |
+            sessions/
+            last_count.txt
+            session_id.txt
+          retention-days: 7
+          if-no-files-found: ignore
+      
+      - name: 📊 Final Statistics
+        if: always()
+        run: |
+          echo ""
+          echo "════════════════════════════════════════════"
+          echo "📊 RAJ MESSENGER STATS"
+          echo "════════════════════════════════════════════"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Run Number: ${{ github.run_number }}"
+          echo "Trigger: ${{ github.event_name }}"
+          echo ""
+          
+          if [ -f last_count.txt ]; then
+            echo "✅ Total Messages: $(cat last_count.txt)"
+          else
+            echo "✅ Total Messages: 0"
+          fi
+          
+          if [ -f session_id.txt ]; then
+            echo "✅ Session ID: $(cat session_id.txt)"
+          fi
+          
+          echo ""
+          echo "🕒 Next run in: < 1 minute (CRON: */15)"
+          echo "════════════════════════════════════════════"
