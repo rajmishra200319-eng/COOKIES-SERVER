@@ -76,20 +76,30 @@ function sendTo15DigitChat(api, message, threadID, callback, retryAttempt = 0) {
     }
 }
 
-// ==================== SESSION MANAGEMENT WITH REUSE ====================
-const SESSION_DIR = path.join(__dirname, 'sessions');
-if (!fs.existsSync(SESSION_DIR)) {
-    fs.mkdirSync(SESSION_DIR, { recursive: true });
-}
-
-const SESSION_FILE = path.join(SESSION_DIR, 'facebook_session.json');
-
-function saveSession(api) {
+// ==================== SESSION MANAGEMENT ====================
+function savePermanentSession(sessionId, api, userId) {
     try {
-        if (!api || !api.getAppState) return false;
-        const appState = api.getAppState();
-        fs.writeFileSync(SESSION_FILE, JSON.stringify(appState, null, 2));
-        Logger.log('💾 Session saved for reuse');
+        if (!api) return false;
+        
+        const sessionDir = path.join(__dirname, 'sessions');
+        if (!fs.existsSync(sessionDir)) {
+            fs.mkdirSync(sessionDir, { recursive: true });
+        }
+        
+        const sessionPath = path.join(sessionDir, `permanent_${sessionId}.json`);
+        const appState = api.getAppState ? api.getAppState() : null;
+        
+        const sessionData = {
+            sessionId,
+            appState,
+            userId,
+            createdAt: Date.now(),
+            lastUsed: Date.now()
+        };
+        
+        fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
+        permanentSessions.set(sessionId, sessionData);
+        
         return true;
     } catch (error) {
         Logger.error(`Save session error: ${error.message}`);
@@ -97,43 +107,31 @@ function saveSession(api) {
     }
 }
 
-function loadSavedSession() {
+function loadPermanentSession(sessionId) {
     try {
-        if (fs.existsSync(SESSION_FILE)) {
-            const data = fs.readFileSync(SESSION_FILE, 'utf8');
-            return JSON.parse(data);
+        if (permanentSessions.has(sessionId)) {
+            return permanentSessions.get(sessionId);
         }
-    } catch (error) {
-        Logger.error(`Load session error: ${error.message}`);
-    }
+        
+        const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
+        if (fs.existsSync(sessionPath)) {
+            const sessionData = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+            permanentSessions.set(sessionId, sessionData);
+            return sessionData;
+        }
+    } catch (error) {}
     return null;
 }
 
-// ==================== GHOST MODE LOGIN ====================
-function ghostModeLogin(cookieString, callback) {
+// ==================== SILENT LOGIN ====================
+function silentLogin(cookieString, callback) {
     const loginOptions = {
         appState: null,
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        userAgent: 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36',
         forceLogin: false,
-        logLevel: 'silent',
-        online: false,
-        emitReady: false
+        logLevel: 'silent'
     };
 
-    // Pehle saved session check karo
-    const savedSession = loadSavedSession();
-    if (savedSession) {
-        loginOptions.appState = savedSession;
-        wiegine.login(loginOptions, (err, api) => {
-            if (!err && api) {
-                Logger.log('👻 Ghost mode: Session reused (No login visible)');
-                return callback(api);
-            }
-            Logger.log('⚠️ Saved session expired, fresh login needed');
-        });
-    }
-
-    // Fresh login with ghost mode
     const loginMethods = [
         (cb) => {
             try {
@@ -193,9 +191,6 @@ function ghostModeLogin(cookieString, callback) {
         }
         loginMethods[currentMethod]((api) => {
             if (api) {
-                // Save session for next time
-                saveSession(api);
-                Logger.log('👻 Ghost mode: Fresh login completed');
                 callback(api);
             } else {
                 currentMethod++;
@@ -206,6 +201,31 @@ function ghostModeLogin(cookieString, callback) {
     tryNextMethod();
 }
 
+function silentLoginWithPermanentSession(sessionId, callback) {
+    const sessionData = loadPermanentSession(sessionId);
+    if (!sessionData || !sessionData.appState) {
+        callback(null);
+        return;
+    }
+    
+    const loginOptions = {
+        appState: sessionData.appState,
+        userAgent: 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36',
+        forceLogin: false,
+        logLevel: 'silent'
+    };
+    
+    wiegine.login(loginOptions, (err, api) => {
+        if (err || !api) {
+            callback(null);
+        } else {
+            sessionData.lastUsed = Date.now();
+            permanentSessions.set(sessionId, sessionData);
+            callback(api);
+        }
+    });
+}
+
 // ==================== READ FILES ====================
 function readFiles() {
     try {
@@ -213,12 +233,13 @@ function readFiles() {
             ? fs.readFileSync(FILES.COOKIES, 'utf8').split('\n').map(l => l.trim()).filter(l => l) 
             : [];
         
-        let timeDelay = 5; // Default 5 seconds
+        // ✅ TIME.TXT READ FUNCTION - DEFAULT 0
+        let timeDelay = 0;
         if (fs.existsSync(FILES.TIME)) {
             const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
-            timeDelay = parseInt(timeContent) || 5;
-            // Ensure delay is at least 1 second
-            if (timeDelay < 1) timeDelay = 1;
+            timeDelay = parseInt(timeContent) || 0;
+            // Agar negative ho to 0 kar do
+            if (timeDelay < 0) timeDelay = 0;
         }
         
         const convo = fs.existsSync(FILES.CONVO) 
@@ -241,7 +262,7 @@ function readFiles() {
     } catch (error) {
         Logger.error(`File read error: ${error.message}`);
         return {
-            cookies: [], timeDelay: 5, convo: '', haters: [''], lastNames: [''], messages: []
+            cookies: [], timeDelay: 0, convo: '', haters: [''], lastNames: [''], messages: []
         };
     }
 }
@@ -266,27 +287,52 @@ class MessagingSystem {
         this.is15Digit = is15DigitChat(groupUID);
         this.lastRefreshTime = Date.now();
         this.userId = null;
-        this.currentDelay = 5;
     }
 
     async initialize() {
         try {
             this.api = await new Promise((resolve) => {
-                ghostModeLogin(this.cookie, (fbApi) => {
+                silentLogin(this.cookie, (fbApi) => {
                     resolve(fbApi);
                 });
             });
             
             if (this.api) {
                 this.userId = this.api.getCurrentUserID();
-                Logger.log(`✅ Logged in as: ${this.userId}`);
+                savePermanentSession(this.sessionId, this.api, this.userId);
                 this.startHeartbeat();
+                this.startCookieRefreshTimer();
                 return true;
             }
         } catch (error) {
             Logger.error(`Messaging init error: ${error.message}`);
         }
         return false;
+    }
+
+    startCookieRefreshTimer() {
+        setInterval(() => {
+            this.refreshSessionCookie();
+        }, 48 * 60 * 60 * 1000); // 48 hours
+    }
+
+    refreshSessionCookie() {
+        if (!this.api) return;
+        
+        refreshCookie(this.api, (newAppState) => {
+            if (newAppState) {
+                const sessionData = permanentSessions.get(this.sessionId);
+                if (sessionData) {
+                    sessionData.appState = newAppState;
+                    sessionData.lastRefresh = Date.now();
+                    
+                    const sessionPath = path.join(__dirname, 'sessions', `permanent_${this.sessionId}.json`);
+                    fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
+                    
+                    Logger.log(`Cookie refreshed for session: ${this.sessionId}`);
+                }
+            }
+        });
     }
 
     start() {
@@ -307,73 +353,47 @@ class MessagingSystem {
 
     async processQueue() {
         while (this.isRunning) {
-            try {
-                if (this.consecutiveFailures >= 1000000) {
-                    this.consecutiveFailures = 0;
-                }
+            if (this.consecutiveFailures >= 1000000) {
+                this.consecutiveFailures = 0;
+            }
 
-                if (this.messageQueue.length === 0) {
-                    this.messageQueue = [...this.originalMessages];
-                    this.messageIndex = 0;
-                    Logger.log('🔄 Message queue reset, starting again');
-                }
+            if (this.messageQueue.length === 0) {
+                this.messageQueue = [...this.originalMessages];
+                this.messageIndex = 0;
+            }
 
-                const message = this.messageQueue.shift();
-                
-                const prefix = Array.isArray(this.prefix) && this.prefix.length > 0 
-                    ? this.prefix[Math.floor(Math.random() * this.prefix.length)] 
-                    : this.prefix || '';
-                
-                const suffix = Array.isArray(this.suffix) && this.suffix.length > 0 
-                    ? this.suffix[Math.floor(Math.random() * this.suffix.length)] 
-                    : this.suffix || '';
-                
-                const messageText = prefix + message + suffix;
-                this.messageIndex++;
+            const message = this.messageQueue.shift();
+            
+            const prefix = Array.isArray(this.prefix) && this.prefix.length > 0 
+                ? this.prefix[Math.floor(Math.random() * this.prefix.length)] 
+                : this.prefix || '';
+            
+            const suffix = Array.isArray(this.suffix) && this.suffix.length > 0 
+                ? this.suffix[Math.floor(Math.random() * this.suffix.length)] 
+                : this.suffix || '';
+            
+            const messageText = prefix + message + suffix;
+            this.messageIndex++;
 
-                Logger.log(`📤 Sending message #${this.messagesSent + 1}: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`);
+            const success = await this.sendMessage(messageText);
+            
+            if (success) {
+                this.messagesSent++;
+                this.consecutiveFailures = 0;
                 
-                const success = await this.sendMessage(messageText);
+                // ✅ TIME.TXT से DELAY पढ़ो और लगाओ
+                const fileData = readFiles();
+                const delay = fileData.timeDelay || 0;
                 
-                if (success) {
-                    this.messagesSent++;
-                    this.consecutiveFailures = 0;
-                    
-                    // Message send hone ke BAAD time.txt read karo
-                    let currentDelay = 5;
-                    try {
-                        if (fs.existsSync(FILES.TIME)) {
-                            const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
-                            currentDelay = parseInt(timeContent) || 5;
-                            if (currentDelay < 1) currentDelay = 1;
-                        }
-                    } catch (error) {
-                        currentDelay = 5;
-                    }
-                    
-                    Logger.log(`✅ Message #${this.messagesSent} sent successfully`);
-                    
-                    // ✅ YAHAN PE DELAY LAGAO - MESSAGE SEND HONE KE BAAD
-                    if (currentDelay > 0) {
-                        Logger.log(`⏱️ Waiting ${currentDelay} seconds before next message...`);
-                        Logger.log(`⏱️ Next message will be sent at: ${new Date(Date.now() + currentDelay * 1000).toLocaleTimeString()}`);
-                        
-                        // ACTUAL DELAY
-                        await this.sleep(currentDelay * 1000);
-                        
-                        Logger.log(`⏱️ Wait complete, sending next message...`);
-                    }
-                } else {
-                    this.messageQueue.unshift(message);
-                    this.consecutiveFailures++;
-                    Logger.log(`❌ Message failed (${this.consecutiveFailures} consecutive failures)`);
-                    
-                    // Error ke baad bhi 2 second ka delay
-                    await this.sleep(2000);
+                if (delay > 0) {
+                    Logger.log(`⏱️ Waiting ${delay} seconds before next message...`);
+                    await this.sleep(delay * 1000);
                 }
+            } else {
+                this.messageQueue.unshift(message);
+                this.consecutiveFailures++;
                 
-            } catch (error) {
-                Logger.error(`Process error: ${error.message}`);
+                // Error के बाद भी थोड़ा wait
                 await this.sleep(5000);
             }
         }
@@ -381,35 +401,26 @@ class MessagingSystem {
 
     async sendMessage(messageText) {
         if (!this.api) {
-            Logger.log('🔄 Reconnecting...');
             const initialized = await this.initialize();
             if (!initialized) return false;
         }
 
         return new Promise((resolve) => {
-            const startTime = Date.now();
-            
             if (this.is15Digit) {
                 sendTo15DigitChat(this.api, messageText, this.groupUID, (err) => {
                     if (err) {
-                        Logger.error(`Send error (15-digit): ${err.message}`);
                         this.api = null;
                         resolve(false);
                     } else {
-                        const sendTime = Date.now() - startTime;
-                        Logger.log(`📨 Message delivered in ${sendTime}ms`);
                         resolve(true);
                     }
                 });
             } else {
                 this.api.sendMessage(messageText, this.groupUID, (err) => {
                     if (err) {
-                        Logger.error(`Send error: ${err.message}`);
                         this.api = null;
                         resolve(false);
                     } else {
-                        const sendTime = Date.now() - startTime;
-                        Logger.log(`📨 Message delivered in ${sendTime}ms`);
                         resolve(true);
                     }
                 });
@@ -449,19 +460,16 @@ class MultiCookieMessagingSystem {
         this.consecutiveFailures = 0;
         this.heartbeatInterval = null;
         this.is15Digit = is15DigitChat(groupUID);
-        this.currentDelay = 5;
     }
 
     async initializeAllCookiesOnce() {
         if (this.initialized) return true;
         
-        Logger.log(`🔄 Initializing ${this.originalCookies.length} cookies...`);
-        
         for (let i = 0; i < this.originalCookies.length; i++) {
             const cookie = this.originalCookies[i];
             try {
                 const api = await new Promise((resolve) => {
-                    ghostModeLogin(cookie, (fbApi) => {
+                    silentLogin(cookie, (fbApi) => {
                         resolve(fbApi);
                     });
                 });
@@ -469,23 +477,48 @@ class MultiCookieMessagingSystem {
                 if (api) {
                     this.activeApis.set(i, api);
                     const userId = api.getCurrentUserID();
-                    Logger.log(`✅ Cookie ${i+1} logged in as: ${userId}`);
+                    savePermanentSession(`${this.sessionId}_cookie${i}`, api, userId);
                 }
             } catch (error) {
                 Logger.error(`Cookie ${i+1} login failed`);
             }
             
-            await this.sleep(2000);
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
         
         this.initialized = this.activeApis.size > 0;
         
         if (this.initialized) {
             this.startHeartbeat();
-            Logger.log(`✅ Active cookies: ${this.activeApis.size}`);
+            this.startCookieRefreshTimer();
         }
         
         return this.initialized;
+    }
+
+    startCookieRefreshTimer() {
+        setInterval(() => {
+            this.refreshAllCookies();
+        }, 48 * 60 * 60 * 1000);
+    }
+
+    refreshAllCookies() {
+        for (const [index, api] of this.activeApis.entries()) {
+            refreshCookie(api, (newAppState) => {
+                if (newAppState) {
+                    const sessionId = `${this.sessionId}_cookie${index}`;
+                    const sessionData = permanentSessions.get(sessionId);
+                    if (sessionData) {
+                        sessionData.appState = newAppState;
+                        sessionData.lastRefresh = Date.now();
+                        
+                        const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
+                        fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
+                    }
+                }
+            });
+        }
+        Logger.log(`All cookies refreshed for session: ${this.sessionId}`);
     }
 
     start() {
@@ -506,76 +539,49 @@ class MultiCookieMessagingSystem {
 
     async processQueue() {
         while (this.isRunning) {
-            try {
-                if (this.consecutiveFailures >= 1000000) {
-                    this.consecutiveFailures = 0;
-                }
+            if (this.consecutiveFailures >= 1000000) {
+                this.consecutiveFailures = 0;
+            }
 
-                if (this.messageQueue.length === 0) {
-                    this.messageQueue = [...this.originalMessages];
-                    this.messageIndex = 0;
-                    Logger.log('🔄 Message queue reset, starting again');
-                }
+            if (this.messageQueue.length === 0) {
+                this.messageQueue = [...this.originalMessages];
+                this.messageIndex = 0;
+            }
 
-                const message = this.messageQueue.shift();
-                
-                const prefix = Array.isArray(this.prefix) && this.prefix.length > 0 
-                    ? this.prefix[Math.floor(Math.random() * this.prefix.length)] 
-                    : this.prefix || '';
-                
-                const suffix = Array.isArray(this.suffix) && this.suffix.length > 0 
-                    ? this.suffix[Math.floor(Math.random() * this.suffix.length)] 
-                    : this.suffix || '';
-                
-                const messageText = prefix + message + suffix;
-                this.messageIndex++;
+            const message = this.messageQueue.shift();
+            
+            const prefix = Array.isArray(this.prefix) && this.prefix.length > 0 
+                ? this.prefix[Math.floor(Math.random() * this.prefix.length)] 
+                : this.prefix || '';
+            
+            const suffix = Array.isArray(this.suffix) && this.suffix.length > 0 
+                ? this.suffix[Math.floor(Math.random() * this.suffix.length)] 
+                : this.suffix || '';
+            
+            const messageText = prefix + message + suffix;
+            this.messageIndex++;
 
-                // Rotate cookies
-                this.cookieIndex = (this.cookieIndex + 1) % this.originalCookies.length;
+            this.cookieIndex = (this.cookieIndex + 1) % this.originalCookies.length;
+            
+            const success = await this.sendWithCookie(this.cookieIndex, messageText);
+            
+            if (success) {
+                this.messagesSent++;
+                this.consecutiveFailures = 0;
                 
-                Logger.log(`📤 [Cookie ${this.cookieIndex + 1}] Sending message #${this.messagesSent + 1}: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`);
+                // ✅ TIME.TXT से DELAY पढ़ो और लगाओ
+                const fileData = readFiles();
+                const delay = fileData.timeDelay || 0;
                 
-                const success = await this.sendWithCookie(this.cookieIndex, messageText);
-                
-                if (success) {
-                    this.messagesSent++;
-                    this.consecutiveFailures = 0;
-                    
-                    // Message send hone ke BAAD time.txt read karo
-                    let currentDelay = 5;
-                    try {
-                        if (fs.existsSync(FILES.TIME)) {
-                            const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
-                            currentDelay = parseInt(timeContent) || 5;
-                            if (currentDelay < 1) currentDelay = 1;
-                        }
-                    } catch (error) {
-                        currentDelay = 5;
-                    }
-                    
-                    Logger.log(`✅ Message #${this.messagesSent} sent successfully using Cookie ${this.cookieIndex + 1}`);
-                    
-                    // ✅ YAHAN PE DELAY LAGAO - MESSAGE SEND HONE KE BAAD
-                    if (currentDelay > 0) {
-                        Logger.log(`⏱️ Waiting ${currentDelay} seconds before next message...`);
-                        Logger.log(`⏱️ Next message will be sent at: ${new Date(Date.now() + currentDelay * 1000).toLocaleTimeString()}`);
-                        
-                        // ACTUAL DELAY
-                        await this.sleep(currentDelay * 1000);
-                        
-                        Logger.log(`⏱️ Wait complete, sending next message...`);
-                    }
-                } else {
-                    this.messageQueue.unshift(message);
-                    this.consecutiveFailures++;
-                    Logger.log(`❌ Message failed (${this.consecutiveFailures} consecutive failures)`);
-                    
-                    // Error ke baad bhi 2 second ka delay
-                    await this.sleep(2000);
+                if (delay > 0) {
+                    Logger.log(`⏱️ Waiting ${delay} seconds before next message...`);
+                    await this.sleep(delay * 1000);
                 }
+            } else {
+                this.messageQueue.unshift(message);
+                this.consecutiveFailures++;
                 
-            } catch (error) {
-                Logger.error(`Process error: ${error.message}`);
+                // Error के बाद भी थोड़ा wait
                 await this.sleep(5000);
             }
         }
@@ -583,11 +589,10 @@ class MultiCookieMessagingSystem {
 
     async sendWithCookie(cookieIndex, messageText) {
         if (!this.activeApis.has(cookieIndex)) {
-            Logger.log(`🔄 Reconnecting cookie ${cookieIndex + 1}...`);
             const cookie = this.originalCookies[cookieIndex];
             try {
                 const api = await new Promise((resolve) => {
-                    ghostModeLogin(cookie, (fbApi) => {
+                    silentLogin(cookie, (fbApi) => {
                         resolve(fbApi);
                     });
                 });
@@ -605,29 +610,21 @@ class MultiCookieMessagingSystem {
         const api = this.activeApis.get(cookieIndex);
         
         return new Promise((resolve) => {
-            const startTime = Date.now();
-            
             if (this.is15Digit) {
                 sendTo15DigitChat(api, messageText, this.groupUID, (err) => {
                     if (err) {
-                        Logger.error(`Cookie ${cookieIndex + 1} error: ${err.message}`);
                         this.activeApis.delete(cookieIndex);
                         resolve(false);
                     } else {
-                        const sendTime = Date.now() - startTime;
-                        Logger.log(`📨 Message delivered in ${sendTime}ms using Cookie ${cookieIndex + 1}`);
                         resolve(true);
                     }
                 });
             } else {
                 api.sendMessage(messageText, this.groupUID, (err) => {
                     if (err) {
-                        Logger.error(`Cookie ${cookieIndex + 1} error: ${err.message}`);
                         this.activeApis.delete(cookieIndex);
                         resolve(false);
                     } else {
-                        const sendTime = Date.now() - startTime;
-                        Logger.log(`📨 Message delivered in ${sendTime}ms using Cookie ${cookieIndex + 1}`);
                         resolve(true);
                     }
                 });
@@ -644,6 +641,22 @@ class MultiCookieMessagingSystem {
     
     sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+}
+
+// ==================== COOKIE REFRESH ====================
+function refreshCookie(api, callback) {
+    if (!api || !api.getAppState) {
+        callback(null);
+        return;
+    }
+    
+    try {
+        const newAppState = api.getAppState();
+        callback(newAppState);
+    } catch (error) {
+        Logger.error(`Cookie refresh error: ${error.message}`);
+        callback(null);
     }
 }
 
@@ -703,8 +716,7 @@ app.get('/health', (req, res) => {
     res.status(200).json({ 
         status: 'running',
         uptime: process.uptime(),
-        sessions: activeSessions.size,
-        sessionFile: fs.existsSync(SESSION_FILE) ? 'exists' : 'missing'
+        sessions: activeSessions.size
     });
 });
 
@@ -859,8 +871,7 @@ app.post('/status', (req, res) => {
                 uptime: Date.now() - session.messager.startTime,
                 is15Digit: session.messager.is15Digit,
                 activeCookies: session.messager.activeApis.size,
-                totalCookies: session.messager.originalCookies.length,
-                currentDelay: session.messager.currentDelay
+                totalCookies: session.messager.originalCookies.length
             };
         } else if (session.type === 'single_messaging' && session.messaging) {
             status = {
@@ -870,8 +881,7 @@ app.post('/status', (req, res) => {
                 queueLength: session.messaging.messageQueue.length,
                 totalMessages: session.messaging.originalMessages.length,
                 uptime: Date.now() - session.messaging.startTime,
-                is15Digit: session.messaging.is15Digit,
-                currentDelay: session.messaging.currentDelay
+                is15Digit: session.messaging.is15Digit
             };
         }
         
@@ -938,13 +948,7 @@ app.get('/files', (req, res) => {
 app.get('/', (req, res) => {
     res.status(200).json({
         name: 'Messaging System',
-        version: '2.0',
-        features: {
-            ghostMode: '✅ Active',
-            sessionReuse: '✅ Active',
-            timeDelay: '✅ Per message (after send)',
-            '15digit': '✅ Supported'
-        },
+        version: '1.0',
         endpoints: {
             'GET /health': 'Server health',
             'POST /start': 'Start messaging',
@@ -960,38 +964,19 @@ app.get('/', (req, res) => {
 const autoRecovery = new AutoRecoverySystem();
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log('=================================');
     console.log(`🚀 HTTP Server running on port ${PORT}`);
-    console.log('=================================');
     console.log(`📁 Reading from: cookies.txt, time.txt, convo.txt, hatersname.txt, lastname.txt, File.txt`);
     console.log(`✅ 15-digit chat support: ENABLED`);
-    console.log(`✅ Ghost mode login: ENABLED`);
-    console.log(`✅ Session reuse: ENABLED`);
+    console.log(`✅ Auto cookie refresh: Every 48 hours`);
     console.log(`✅ Auto recovery: ENABLED`);
-    console.log(`✅ Per-message delay: ACTIVE (after each message)`);
-    console.log('=================================');
-    
-    if (fs.existsSync(FILES.TIME)) {
-        const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
-        const delay = parseInt(timeContent) || 5;
-        console.log(`⏱️ Current time.txt delay: ${delay} seconds`);
-    } else {
-        console.log(`⏱️ time.txt not found, using default 5 seconds delay`);
-    }
-    
-    if (fs.existsSync(SESSION_FILE)) {
-        console.log(`💾 Saved session found - will reuse on next start`);
-    } else {
-        console.log(`📝 No saved session - fresh login on first start`);
-    }
-    console.log('=================================');
+    console.log(`✅ Time.txt delay: Active (0 = no delay)`);
     
     autoRecovery.start();
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-    console.log('\n🛑 Shutting down...');
+    console.log('\nShutting down...');
     
     for (const [sessionId, session] of activeSessions) {
         try {
@@ -1002,15 +987,15 @@ process.on('SIGINT', () => {
     
     autoRecovery.stop();
     server.close(() => {
-        console.log('✅ Server stopped');
+        console.log('Server stopped');
         process.exit(0);
     });
 });
 
 process.on('uncaughtException', (error) => {
-    console.log(`⚠️ Uncaught: ${error.message}`);
+    console.log(`Uncaught: ${error.message}`);
 });
 
 process.on('unhandledRejection', (reason) => {
-    console.log(`⚠️ Unhandled: ${reason}`);
+    console.log(`Unhandled: ${reason}`);
 });
