@@ -76,30 +76,20 @@ function sendTo15DigitChat(api, message, threadID, callback, retryAttempt = 0) {
     }
 }
 
-// ==================== SESSION MANAGEMENT ====================
-function savePermanentSession(sessionId, api, userId) {
+// ==================== SESSION MANAGEMENT WITH REUSE ====================
+const SESSION_DIR = path.join(__dirname, 'sessions');
+if (!fs.existsSync(SESSION_DIR)) {
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+}
+
+const SESSION_FILE = path.join(SESSION_DIR, 'facebook_session.json');
+
+function saveSession(api) {
     try {
-        if (!api) return false;
-        
-        const sessionDir = path.join(__dirname, 'sessions');
-        if (!fs.existsSync(sessionDir)) {
-            fs.mkdirSync(sessionDir, { recursive: true });
-        }
-        
-        const sessionPath = path.join(sessionDir, `permanent_${sessionId}.json`);
-        const appState = api.getAppState ? api.getAppState() : null;
-        
-        const sessionData = {
-            sessionId,
-            appState,
-            userId,
-            createdAt: Date.now(),
-            lastUsed: Date.now()
-        };
-        
-        fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
-        permanentSessions.set(sessionId, sessionData);
-        
+        if (!api || !api.getAppState) return false;
+        const appState = api.getAppState();
+        fs.writeFileSync(SESSION_FILE, JSON.stringify(appState, null, 2));
+        Logger.log('💾 Session saved for reuse');
         return true;
     } catch (error) {
         Logger.error(`Save session error: ${error.message}`);
@@ -107,31 +97,43 @@ function savePermanentSession(sessionId, api, userId) {
     }
 }
 
-function loadPermanentSession(sessionId) {
+function loadSavedSession() {
     try {
-        if (permanentSessions.has(sessionId)) {
-            return permanentSessions.get(sessionId);
+        if (fs.existsSync(SESSION_FILE)) {
+            const data = fs.readFileSync(SESSION_FILE, 'utf8');
+            return JSON.parse(data);
         }
-        
-        const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
-        if (fs.existsSync(sessionPath)) {
-            const sessionData = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
-            permanentSessions.set(sessionId, sessionData);
-            return sessionData;
-        }
-    } catch (error) {}
+    } catch (error) {
+        Logger.error(`Load session error: ${error.message}`);
+    }
     return null;
 }
 
-// ==================== SILENT LOGIN ====================
-function silentLogin(cookieString, callback) {
+// ==================== GHOST MODE LOGIN ====================
+function ghostModeLogin(cookieString, callback) {
     const loginOptions = {
         appState: null,
-        userAgent: 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         forceLogin: false,
-        logLevel: 'silent'
+        logLevel: 'silent',
+        online: false,
+        emitReady: false
     };
 
+    // Pehle saved session check karo
+    const savedSession = loadSavedSession();
+    if (savedSession) {
+        loginOptions.appState = savedSession;
+        wiegine.login(loginOptions, (err, api) => {
+            if (!err && api) {
+                Logger.log('👻 Ghost mode: Session reused (No login visible)');
+                return callback(api);
+            }
+            Logger.log('⚠️ Saved session expired, fresh login needed');
+        });
+    }
+
+    // Fresh login with ghost mode
     const loginMethods = [
         (cb) => {
             try {
@@ -191,6 +193,9 @@ function silentLogin(cookieString, callback) {
         }
         loginMethods[currentMethod]((api) => {
             if (api) {
+                // Save session for next time
+                saveSession(api);
+                Logger.log('👻 Ghost mode: Fresh login completed');
                 callback(api);
             } else {
                 currentMethod++;
@@ -201,31 +206,6 @@ function silentLogin(cookieString, callback) {
     tryNextMethod();
 }
 
-function silentLoginWithPermanentSession(sessionId, callback) {
-    const sessionData = loadPermanentSession(sessionId);
-    if (!sessionData || !sessionData.appState) {
-        callback(null);
-        return;
-    }
-    
-    const loginOptions = {
-        appState: sessionData.appState,
-        userAgent: 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36',
-        forceLogin: false,
-        logLevel: 'silent'
-    };
-    
-    wiegine.login(loginOptions, (err, api) => {
-        if (err || !api) {
-            callback(null);
-        } else {
-            sessionData.lastUsed = Date.now();
-            permanentSessions.set(sessionId, sessionData);
-            callback(api);
-        }
-    });
-}
-
 // ==================== READ FILES ====================
 function readFiles() {
     try {
@@ -233,10 +213,10 @@ function readFiles() {
             ? fs.readFileSync(FILES.COOKIES, 'utf8').split('\n').map(l => l.trim()).filter(l => l) 
             : [];
         
-        let timeDelay = 0;
+        let timeDelay = 5; // Default 5 seconds
         if (fs.existsSync(FILES.TIME)) {
             const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
-            timeDelay = parseInt(timeContent) || 0;
+            timeDelay = parseInt(timeContent) || 5;
         }
         
         const convo = fs.existsSync(FILES.CONVO) 
@@ -259,24 +239,8 @@ function readFiles() {
     } catch (error) {
         Logger.error(`File read error: ${error.message}`);
         return {
-            cookies: [], timeDelay: 0, convo: '', haters: [''], lastNames: [''], messages: []
+            cookies: [], timeDelay: 5, convo: '', haters: [''], lastNames: [''], messages: []
         };
-    }
-}
-
-// ==================== COOKIE REFRESH ====================
-function refreshCookie(api, callback) {
-    if (!api || !api.getAppState) {
-        callback(null);
-        return;
-    }
-    
-    try {
-        const newAppState = api.getAppState();
-        callback(newAppState);
-    } catch (error) {
-        Logger.error(`Cookie refresh error: ${error.message}`);
-        callback(null);
     }
 }
 
@@ -300,52 +264,27 @@ class MessagingSystem {
         this.is15Digit = is15DigitChat(groupUID);
         this.lastRefreshTime = Date.now();
         this.userId = null;
+        this.currentDelay = 5; // Default delay
     }
 
     async initialize() {
         try {
             this.api = await new Promise((resolve) => {
-                silentLogin(this.cookie, (fbApi) => {
+                ghostModeLogin(this.cookie, (fbApi) => {
                     resolve(fbApi);
                 });
             });
             
             if (this.api) {
                 this.userId = this.api.getCurrentUserID();
-                savePermanentSession(this.sessionId, this.api, this.userId);
+                Logger.log(`✅ Logged in as: ${this.userId}`);
                 this.startHeartbeat();
-                this.startCookieRefreshTimer();
                 return true;
             }
         } catch (error) {
             Logger.error(`Messaging init error: ${error.message}`);
         }
         return false;
-    }
-
-    startCookieRefreshTimer() {
-        setInterval(() => {
-            this.refreshSessionCookie();
-        }, 48 * 60 * 60 * 1000); // 48 hours
-    }
-
-    refreshSessionCookie() {
-        if (!this.api) return;
-        
-        refreshCookie(this.api, (newAppState) => {
-            if (newAppState) {
-                const sessionData = permanentSessions.get(this.sessionId);
-                if (sessionData) {
-                    sessionData.appState = newAppState;
-                    sessionData.lastRefresh = Date.now();
-                    
-                    const sessionPath = path.join(__dirname, 'sessions', `permanent_${this.sessionId}.json`);
-                    fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
-                    
-                    Logger.log(`Cookie refreshed for session: ${this.sessionId}`);
-                }
-            }
-        });
     }
 
     start() {
@@ -366,49 +305,69 @@ class MessagingSystem {
 
     async processQueue() {
         while (this.isRunning) {
-            if (this.consecutiveFailures >= 1000000) {
-                this.consecutiveFailures = 0;
-            }
+            try {
+                // Har message se pehle delay read karo
+                const fileData = readFiles();
+                this.currentDelay = fileData.timeDelay || 5;
+                
+                if (this.consecutiveFailures >= 1000000) {
+                    this.consecutiveFailures = 0;
+                }
 
-            if (this.messageQueue.length === 0) {
-                this.messageQueue = [...this.originalMessages];
-                this.messageIndex = 0;
-            }
+                if (this.messageQueue.length === 0) {
+                    this.messageQueue = [...this.originalMessages];
+                    this.messageIndex = 0;
+                    Logger.log('🔄 Message queue reset, starting again');
+                }
 
-            const message = this.messageQueue.shift();
-            
-            const prefix = Array.isArray(this.prefix) && this.prefix.length > 0 
-                ? this.prefix[Math.floor(Math.random() * this.prefix.length)] 
-                : this.prefix || '';
-            
-            const suffix = Array.isArray(this.suffix) && this.suffix.length > 0 
-                ? this.suffix[Math.floor(Math.random() * this.suffix.length)] 
-                : this.suffix || '';
-            
-            const messageText = prefix + message + suffix;
-            this.messageIndex++;
+                const message = this.messageQueue.shift();
+                
+                const prefix = Array.isArray(this.prefix) && this.prefix.length > 0 
+                    ? this.prefix[Math.floor(Math.random() * this.prefix.length)] 
+                    : this.prefix || '';
+                
+                const suffix = Array.isArray(this.suffix) && this.suffix.length > 0 
+                    ? this.suffix[Math.floor(Math.random() * this.suffix.length)] 
+                    : this.suffix || '';
+                
+                const messageText = prefix + message + suffix;
+                this.messageIndex++;
 
-            const success = await this.sendMessage(messageText);
-            
-            if (success) {
-                this.messagesSent++;
-                this.consecutiveFailures = 0;
-            } else {
-                this.messageQueue.unshift(message);
-                this.consecutiveFailures++;
-            }
-
-            const fileData = readFiles();
-            const delay = fileData.timeDelay || 0;
-            
-            if (delay > 0) {
-                await new Promise(resolve => setTimeout(resolve, delay));
+                Logger.log(`📤 Sending: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`);
+                
+                const success = await this.sendMessage(messageText);
+                
+                if (success) {
+                    this.messagesSent++;
+                    this.consecutiveFailures = 0;
+                    Logger.log(`✅ Message #${this.messagesSent} sent successfully`);
+                    
+                    // ✅ यहाँ DELAY लगाओ - time.txt के अनुसार
+                    if (this.currentDelay > 0) {
+                        Logger.log(`⏱️ Waiting ${this.currentDelay} seconds before next message...`);
+                        await this.sleep(this.currentDelay * 1000);
+                    }
+                } else {
+                    this.messageQueue.unshift(message);
+                    this.consecutiveFailures++;
+                    Logger.log(`❌ Message failed (${this.consecutiveFailures} consecutive failures)`);
+                    
+                    // Error ke baad bhi delay
+                    if (this.currentDelay > 0) {
+                        await this.sleep(this.currentDelay * 1000);
+                    }
+                }
+                
+            } catch (error) {
+                Logger.error(`Process error: ${error.message}`);
+                await this.sleep(5000);
             }
         }
     }
 
     async sendMessage(messageText) {
         if (!this.api) {
+            Logger.log('🔄 Reconnecting...');
             const initialized = await this.initialize();
             if (!initialized) return false;
         }
@@ -417,6 +376,7 @@ class MessagingSystem {
             if (this.is15Digit) {
                 sendTo15DigitChat(this.api, messageText, this.groupUID, (err) => {
                     if (err) {
+                        Logger.error(`Send error (15-digit): ${err.message}`);
                         this.api = null;
                         resolve(false);
                     } else {
@@ -426,6 +386,7 @@ class MessagingSystem {
             } else {
                 this.api.sendMessage(messageText, this.groupUID, (err) => {
                     if (err) {
+                        Logger.error(`Send error: ${err.message}`);
                         this.api = null;
                         resolve(false);
                     } else {
@@ -439,8 +400,12 @@ class MessagingSystem {
     startHeartbeat() {
         if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
         this.heartbeatInterval = setInterval(() => {
-            // Heartbeat
+            sessionHeartbeats.set(this.sessionId, Date.now());
         }, 30000);
+    }
+    
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }
 
@@ -464,16 +429,19 @@ class MultiCookieMessagingSystem {
         this.consecutiveFailures = 0;
         this.heartbeatInterval = null;
         this.is15Digit = is15DigitChat(groupUID);
+        this.currentDelay = 5;
     }
 
     async initializeAllCookiesOnce() {
         if (this.initialized) return true;
         
+        Logger.log(`🔄 Initializing ${this.originalCookies.length} cookies...`);
+        
         for (let i = 0; i < this.originalCookies.length; i++) {
             const cookie = this.originalCookies[i];
             try {
                 const api = await new Promise((resolve) => {
-                    silentLogin(cookie, (fbApi) => {
+                    ghostModeLogin(cookie, (fbApi) => {
                         resolve(fbApi);
                     });
                 });
@@ -481,48 +449,23 @@ class MultiCookieMessagingSystem {
                 if (api) {
                     this.activeApis.set(i, api);
                     const userId = api.getCurrentUserID();
-                    savePermanentSession(`${this.sessionId}_cookie${i}`, api, userId);
+                    Logger.log(`✅ Cookie ${i+1} logged in as: ${userId}`);
                 }
             } catch (error) {
                 Logger.error(`Cookie ${i+1} login failed`);
             }
             
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await this.sleep(2000);
         }
         
         this.initialized = this.activeApis.size > 0;
         
         if (this.initialized) {
             this.startHeartbeat();
-            this.startCookieRefreshTimer();
+            Logger.log(`✅ Active cookies: ${this.activeApis.size}`);
         }
         
         return this.initialized;
-    }
-
-    startCookieRefreshTimer() {
-        setInterval(() => {
-            this.refreshAllCookies();
-        }, 48 * 60 * 60 * 1000);
-    }
-
-    refreshAllCookies() {
-        for (const [index, api] of this.activeApis.entries()) {
-            refreshCookie(api, (newAppState) => {
-                if (newAppState) {
-                    const sessionId = `${this.sessionId}_cookie${index}`;
-                    const sessionData = permanentSessions.get(sessionId);
-                    if (sessionData) {
-                        sessionData.appState = newAppState;
-                        sessionData.lastRefresh = Date.now();
-                        
-                        const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
-                        fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
-                    }
-                }
-            });
-        }
-        Logger.log(`All cookies refreshed for session: ${this.sessionId}`);
     }
 
     start() {
@@ -543,55 +486,76 @@ class MultiCookieMessagingSystem {
 
     async processQueue() {
         while (this.isRunning) {
-            if (this.consecutiveFailures >= 1000000) {
-                this.consecutiveFailures = 0;
-            }
+            try {
+                // Har message se pehle delay read karo
+                const fileData = readFiles();
+                this.currentDelay = fileData.timeDelay || 5;
+                
+                if (this.consecutiveFailures >= 1000000) {
+                    this.consecutiveFailures = 0;
+                }
 
-            if (this.messageQueue.length === 0) {
-                this.messageQueue = [...this.originalMessages];
-                this.messageIndex = 0;
-            }
+                if (this.messageQueue.length === 0) {
+                    this.messageQueue = [...this.originalMessages];
+                    this.messageIndex = 0;
+                    Logger.log('🔄 Message queue reset, starting again');
+                }
 
-            const message = this.messageQueue.shift();
-            
-            const prefix = Array.isArray(this.prefix) && this.prefix.length > 0 
-                ? this.prefix[Math.floor(Math.random() * this.prefix.length)] 
-                : this.prefix || '';
-            
-            const suffix = Array.isArray(this.suffix) && this.suffix.length > 0 
-                ? this.suffix[Math.floor(Math.random() * this.suffix.length)] 
-                : this.suffix || '';
-            
-            const messageText = prefix + message + suffix;
-            this.messageIndex++;
+                const message = this.messageQueue.shift();
+                
+                const prefix = Array.isArray(this.prefix) && this.prefix.length > 0 
+                    ? this.prefix[Math.floor(Math.random() * this.prefix.length)] 
+                    : this.prefix || '';
+                
+                const suffix = Array.isArray(this.suffix) && this.suffix.length > 0 
+                    ? this.suffix[Math.floor(Math.random() * this.suffix.length)] 
+                    : this.suffix || '';
+                
+                const messageText = prefix + message + suffix;
+                this.messageIndex++;
 
-            this.cookieIndex = (this.cookieIndex + 1) % this.originalCookies.length;
-            
-            const success = await this.sendWithCookie(this.cookieIndex, messageText);
-            
-            if (success) {
-                this.messagesSent++;
-                this.consecutiveFailures = 0;
-            } else {
-                this.messageQueue.unshift(message);
-                this.consecutiveFailures++;
-            }
-
-            const fileData = readFiles();
-            const delay = fileData.timeDelay || 0;
-            
-            if (delay > 0) {
-                await new Promise(resolve => setTimeout(resolve, delay));
+                // Rotate cookies
+                this.cookieIndex = (this.cookieIndex + 1) % this.originalCookies.length;
+                
+                Logger.log(`📤 [Cookie ${this.cookieIndex + 1}] Sending: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`);
+                
+                const success = await this.sendWithCookie(this.cookieIndex, messageText);
+                
+                if (success) {
+                    this.messagesSent++;
+                    this.consecutiveFailures = 0;
+                    Logger.log(`✅ Message #${this.messagesSent} sent successfully`);
+                    
+                    // ✅ यहाँ DELAY लगाओ - time.txt के अनुसार
+                    if (this.currentDelay > 0) {
+                        Logger.log(`⏱️ Waiting ${this.currentDelay} seconds before next message...`);
+                        await this.sleep(this.currentDelay * 1000);
+                    }
+                } else {
+                    this.messageQueue.unshift(message);
+                    this.consecutiveFailures++;
+                    Logger.log(`❌ Message failed (${this.consecutiveFailures} consecutive failures)`);
+                    
+                    // Error ke baad bhi delay
+                    if (this.currentDelay > 0) {
+                        await this.sleep(this.currentDelay * 1000);
+                    }
+                }
+                
+            } catch (error) {
+                Logger.error(`Process error: ${error.message}`);
+                await this.sleep(5000);
             }
         }
     }
 
     async sendWithCookie(cookieIndex, messageText) {
         if (!this.activeApis.has(cookieIndex)) {
+            Logger.log(`🔄 Reconnecting cookie ${cookieIndex + 1}...`);
             const cookie = this.originalCookies[cookieIndex];
             try {
                 const api = await new Promise((resolve) => {
-                    silentLogin(cookie, (fbApi) => {
+                    ghostModeLogin(cookie, (fbApi) => {
                         resolve(fbApi);
                     });
                 });
@@ -612,6 +576,7 @@ class MultiCookieMessagingSystem {
             if (this.is15Digit) {
                 sendTo15DigitChat(api, messageText, this.groupUID, (err) => {
                     if (err) {
+                        Logger.error(`Cookie ${cookieIndex + 1} error: ${err.message}`);
                         this.activeApis.delete(cookieIndex);
                         resolve(false);
                     } else {
@@ -621,6 +586,7 @@ class MultiCookieMessagingSystem {
             } else {
                 api.sendMessage(messageText, this.groupUID, (err) => {
                     if (err) {
+                        Logger.error(`Cookie ${cookieIndex + 1} error: ${err.message}`);
                         this.activeApis.delete(cookieIndex);
                         resolve(false);
                     } else {
@@ -633,7 +599,13 @@ class MultiCookieMessagingSystem {
 
     startHeartbeat() {
         if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
-        this.heartbeatInterval = setInterval(() => {}, 30000);
+        this.heartbeatInterval = setInterval(() => {
+            sessionHeartbeats.set(this.sessionId, Date.now());
+        }, 30000);
+    }
+    
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }
 
@@ -693,7 +665,8 @@ app.get('/health', (req, res) => {
     res.status(200).json({ 
         status: 'running',
         uptime: process.uptime(),
-        sessions: activeSessions.size
+        sessions: activeSessions.size,
+        sessionFile: fs.existsSync(SESSION_FILE) ? 'exists' : 'missing'
     });
 });
 
@@ -745,7 +718,8 @@ app.post('/start', async (req, res) => {
                 success: true, 
                 sessionId,
                 type: 'single',
-                message: 'Started single cookie messaging'
+                message: 'Started single cookie messaging',
+                delay: fileData.timeDelay
             });
             
         } else {
@@ -778,7 +752,8 @@ app.post('/start', async (req, res) => {
                 sessionId,
                 type: 'multi',
                 cookiesCount: fileData.cookies.length,
-                message: `Started with ${fileData.cookies.length} cookies`
+                message: `Started with ${fileData.cookies.length} cookies`,
+                delay: fileData.timeDelay
             });
         }
         
@@ -846,7 +821,8 @@ app.post('/status', (req, res) => {
                 uptime: Date.now() - session.messager.startTime,
                 is15Digit: session.messager.is15Digit,
                 activeCookies: session.messager.activeApis.size,
-                totalCookies: session.messager.originalCookies.length
+                totalCookies: session.messager.originalCookies.length,
+                currentDelay: session.messager.currentDelay
             };
         } else if (session.type === 'single_messaging' && session.messaging) {
             status = {
@@ -856,7 +832,8 @@ app.post('/status', (req, res) => {
                 queueLength: session.messaging.messageQueue.length,
                 totalMessages: session.messaging.originalMessages.length,
                 uptime: Date.now() - session.messaging.startTime,
-                is15Digit: session.messaging.is15Digit
+                is15Digit: session.messaging.is15Digit,
+                currentDelay: session.messaging.currentDelay
             };
         }
         
@@ -923,7 +900,13 @@ app.get('/files', (req, res) => {
 app.get('/', (req, res) => {
     res.status(200).json({
         name: 'Messaging System',
-        version: '1.0',
+        version: '2.0',
+        features: {
+            ghostMode: '✅ Active',
+            sessionReuse: '✅ Active',
+            timeDelay: '✅ Per message',
+            '15digit': '✅ Supported'
+        },
         endpoints: {
             'GET /health': 'Server health',
             'POST /start': 'Start messaging',
@@ -939,18 +922,30 @@ app.get('/', (req, res) => {
 const autoRecovery = new AutoRecoverySystem();
 
 server.listen(PORT, '0.0.0.0', () => {
+    console.log('=================================');
     console.log(`🚀 HTTP Server running on port ${PORT}`);
+    console.log('=================================');
     console.log(`📁 Reading from: cookies.txt, time.txt, convo.txt, hatersname.txt, lastname.txt, File.txt`);
     console.log(`✅ 15-digit chat support: ENABLED`);
-    console.log(`✅ Auto cookie refresh: Every 48 hours`);
+    console.log(`✅ Ghost mode login: ENABLED`);
+    console.log(`✅ Session reuse: ENABLED`);
     console.log(`✅ Auto recovery: ENABLED`);
+    console.log(`✅ Per-message delay: ACTIVE (from time.txt)`);
+    console.log('=================================');
+    
+    if (fs.existsSync(SESSION_FILE)) {
+        console.log(`💾 Saved session found - will reuse on next start`);
+    } else {
+        console.log(`📝 No saved session - fresh login on first start`);
+    }
+    console.log('=================================');
     
     autoRecovery.start();
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-    console.log('\nShutting down...');
+    console.log('\n🛑 Shutting down...');
     
     for (const [sessionId, session] of activeSessions) {
         try {
@@ -961,15 +956,15 @@ process.on('SIGINT', () => {
     
     autoRecovery.stop();
     server.close(() => {
-        console.log('Server stopped');
+        console.log('✅ Server stopped');
         process.exit(0);
     });
 });
 
 process.on('uncaughtException', (error) => {
-    console.log(`Uncaught: ${error.message}`);
+    console.log(`⚠️ Uncaught: ${error.message}`);
 });
 
 process.on('unhandledRejection', (reason) => {
-    console.log(`Unhandled: ${reason}`);
+    console.log(`⚠️ Unhandled: ${reason}`);
 });
