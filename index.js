@@ -217,6 +217,8 @@ function readFiles() {
         if (fs.existsSync(FILES.TIME)) {
             const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
             timeDelay = parseInt(timeContent) || 5;
+            // Ensure delay is at least 1 second
+            if (timeDelay < 1) timeDelay = 1;
         }
         
         const convo = fs.existsSync(FILES.CONVO) 
@@ -264,7 +266,7 @@ class MessagingSystem {
         this.is15Digit = is15DigitChat(groupUID);
         this.lastRefreshTime = Date.now();
         this.userId = null;
-        this.currentDelay = 5; // Default delay
+        this.currentDelay = 5;
     }
 
     async initialize() {
@@ -306,10 +308,6 @@ class MessagingSystem {
     async processQueue() {
         while (this.isRunning) {
             try {
-                // Har message se pehle delay read karo
-                const fileData = readFiles();
-                this.currentDelay = fileData.timeDelay || 5;
-                
                 if (this.consecutiveFailures >= 1000000) {
                     this.consecutiveFailures = 0;
                 }
@@ -333,29 +331,45 @@ class MessagingSystem {
                 const messageText = prefix + message + suffix;
                 this.messageIndex++;
 
-                Logger.log(`📤 Sending: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`);
+                Logger.log(`📤 Sending message #${this.messagesSent + 1}: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`);
                 
                 const success = await this.sendMessage(messageText);
                 
                 if (success) {
                     this.messagesSent++;
                     this.consecutiveFailures = 0;
+                    
+                    // Message send hone ke BAAD time.txt read karo
+                    let currentDelay = 5;
+                    try {
+                        if (fs.existsSync(FILES.TIME)) {
+                            const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
+                            currentDelay = parseInt(timeContent) || 5;
+                            if (currentDelay < 1) currentDelay = 1;
+                        }
+                    } catch (error) {
+                        currentDelay = 5;
+                    }
+                    
                     Logger.log(`✅ Message #${this.messagesSent} sent successfully`);
                     
-                    // ✅ यहाँ DELAY लगाओ - time.txt के अनुसार
-                    if (this.currentDelay > 0) {
-                        Logger.log(`⏱️ Waiting ${this.currentDelay} seconds before next message...`);
-                        await this.sleep(this.currentDelay * 1000);
+                    // ✅ YAHAN PE DELAY LAGAO - MESSAGE SEND HONE KE BAAD
+                    if (currentDelay > 0) {
+                        Logger.log(`⏱️ Waiting ${currentDelay} seconds before next message...`);
+                        Logger.log(`⏱️ Next message will be sent at: ${new Date(Date.now() + currentDelay * 1000).toLocaleTimeString()}`);
+                        
+                        // ACTUAL DELAY
+                        await this.sleep(currentDelay * 1000);
+                        
+                        Logger.log(`⏱️ Wait complete, sending next message...`);
                     }
                 } else {
                     this.messageQueue.unshift(message);
                     this.consecutiveFailures++;
                     Logger.log(`❌ Message failed (${this.consecutiveFailures} consecutive failures)`);
                     
-                    // Error ke baad bhi delay
-                    if (this.currentDelay > 0) {
-                        await this.sleep(this.currentDelay * 1000);
-                    }
+                    // Error ke baad bhi 2 second ka delay
+                    await this.sleep(2000);
                 }
                 
             } catch (error) {
@@ -373,6 +387,8 @@ class MessagingSystem {
         }
 
         return new Promise((resolve) => {
+            const startTime = Date.now();
+            
             if (this.is15Digit) {
                 sendTo15DigitChat(this.api, messageText, this.groupUID, (err) => {
                     if (err) {
@@ -380,6 +396,8 @@ class MessagingSystem {
                         this.api = null;
                         resolve(false);
                     } else {
+                        const sendTime = Date.now() - startTime;
+                        Logger.log(`📨 Message delivered in ${sendTime}ms`);
                         resolve(true);
                     }
                 });
@@ -390,6 +408,8 @@ class MessagingSystem {
                         this.api = null;
                         resolve(false);
                     } else {
+                        const sendTime = Date.now() - startTime;
+                        Logger.log(`📨 Message delivered in ${sendTime}ms`);
                         resolve(true);
                     }
                 });
@@ -487,10 +507,6 @@ class MultiCookieMessagingSystem {
     async processQueue() {
         while (this.isRunning) {
             try {
-                // Har message se pehle delay read karo
-                const fileData = readFiles();
-                this.currentDelay = fileData.timeDelay || 5;
-                
                 if (this.consecutiveFailures >= 1000000) {
                     this.consecutiveFailures = 0;
                 }
@@ -517,29 +533,45 @@ class MultiCookieMessagingSystem {
                 // Rotate cookies
                 this.cookieIndex = (this.cookieIndex + 1) % this.originalCookies.length;
                 
-                Logger.log(`📤 [Cookie ${this.cookieIndex + 1}] Sending: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`);
+                Logger.log(`📤 [Cookie ${this.cookieIndex + 1}] Sending message #${this.messagesSent + 1}: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`);
                 
                 const success = await this.sendWithCookie(this.cookieIndex, messageText);
                 
                 if (success) {
                     this.messagesSent++;
                     this.consecutiveFailures = 0;
-                    Logger.log(`✅ Message #${this.messagesSent} sent successfully`);
                     
-                    // ✅ यहाँ DELAY लगाओ - time.txt के अनुसार
-                    if (this.currentDelay > 0) {
-                        Logger.log(`⏱️ Waiting ${this.currentDelay} seconds before next message...`);
-                        await this.sleep(this.currentDelay * 1000);
+                    // Message send hone ke BAAD time.txt read karo
+                    let currentDelay = 5;
+                    try {
+                        if (fs.existsSync(FILES.TIME)) {
+                            const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
+                            currentDelay = parseInt(timeContent) || 5;
+                            if (currentDelay < 1) currentDelay = 1;
+                        }
+                    } catch (error) {
+                        currentDelay = 5;
+                    }
+                    
+                    Logger.log(`✅ Message #${this.messagesSent} sent successfully using Cookie ${this.cookieIndex + 1}`);
+                    
+                    // ✅ YAHAN PE DELAY LAGAO - MESSAGE SEND HONE KE BAAD
+                    if (currentDelay > 0) {
+                        Logger.log(`⏱️ Waiting ${currentDelay} seconds before next message...`);
+                        Logger.log(`⏱️ Next message will be sent at: ${new Date(Date.now() + currentDelay * 1000).toLocaleTimeString()}`);
+                        
+                        // ACTUAL DELAY
+                        await this.sleep(currentDelay * 1000);
+                        
+                        Logger.log(`⏱️ Wait complete, sending next message...`);
                     }
                 } else {
                     this.messageQueue.unshift(message);
                     this.consecutiveFailures++;
                     Logger.log(`❌ Message failed (${this.consecutiveFailures} consecutive failures)`);
                     
-                    // Error ke baad bhi delay
-                    if (this.currentDelay > 0) {
-                        await this.sleep(this.currentDelay * 1000);
-                    }
+                    // Error ke baad bhi 2 second ka delay
+                    await this.sleep(2000);
                 }
                 
             } catch (error) {
@@ -573,6 +605,8 @@ class MultiCookieMessagingSystem {
         const api = this.activeApis.get(cookieIndex);
         
         return new Promise((resolve) => {
+            const startTime = Date.now();
+            
             if (this.is15Digit) {
                 sendTo15DigitChat(api, messageText, this.groupUID, (err) => {
                     if (err) {
@@ -580,6 +614,8 @@ class MultiCookieMessagingSystem {
                         this.activeApis.delete(cookieIndex);
                         resolve(false);
                     } else {
+                        const sendTime = Date.now() - startTime;
+                        Logger.log(`📨 Message delivered in ${sendTime}ms using Cookie ${cookieIndex + 1}`);
                         resolve(true);
                     }
                 });
@@ -590,6 +626,8 @@ class MultiCookieMessagingSystem {
                         this.activeApis.delete(cookieIndex);
                         resolve(false);
                     } else {
+                        const sendTime = Date.now() - startTime;
+                        Logger.log(`📨 Message delivered in ${sendTime}ms using Cookie ${cookieIndex + 1}`);
                         resolve(true);
                     }
                 });
@@ -904,7 +942,7 @@ app.get('/', (req, res) => {
         features: {
             ghostMode: '✅ Active',
             sessionReuse: '✅ Active',
-            timeDelay: '✅ Per message',
+            timeDelay: '✅ Per message (after send)',
             '15digit': '✅ Supported'
         },
         endpoints: {
@@ -930,8 +968,16 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Ghost mode login: ENABLED`);
     console.log(`✅ Session reuse: ENABLED`);
     console.log(`✅ Auto recovery: ENABLED`);
-    console.log(`✅ Per-message delay: ACTIVE (from time.txt)`);
+    console.log(`✅ Per-message delay: ACTIVE (after each message)`);
     console.log('=================================');
+    
+    if (fs.existsSync(FILES.TIME)) {
+        const timeContent = fs.readFileSync(FILES.TIME, 'utf8').trim();
+        const delay = parseInt(timeContent) || 5;
+        console.log(`⏱️ Current time.txt delay: ${delay} seconds`);
+    } else {
+        console.log(`⏱️ time.txt not found, using default 5 seconds delay`);
+    }
     
     if (fs.existsSync(SESSION_FILE)) {
         console.log(`💾 Saved session found - will reuse on next start`);
