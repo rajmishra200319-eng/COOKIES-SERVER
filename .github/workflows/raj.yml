@@ -1,42 +1,42 @@
 name: FB BOT 24-7 STRONG
 
 on:
-workflow_dispatch:
-schedule:
-- cron: "*/50 * * * *"
+  workflow_dispatch:
+  schedule:
+    - cron: "*/50 * * * *"
 
 concurrency:
-group: fb-bot
-cancel-in-progress: false
+  group: fb-bot
+  cancel-in-progress: false
 
 jobs:
-run-bot:
-runs-on: ubuntu-latest
-timeout-minutes: 350
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
 
-steps:
-  - name: Checkout Repository
-    uses: actions/checkout@v4
-    continue-on-error: true
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        continue-on-error: true
 
-  - name: Setup Node.js
-    uses: actions/setup-node@v4
-    with:
-      node-version: "20"
-      cache: npm
-    continue-on-error: true
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+        continue-on-error: true
 
-  - name: Install Dependencies
-    run: npm install
-    continue-on-error: true
+      - name: Install Dependencies
+        run: npm install
+        continue-on-error: true
 
-  - name: Run Bot With Auto Restart
-    run: |
-      while true
-      do
-        echo "Starting bot..."
-        node index.js || true
-        echo "Bot stopped or crashed. Restarting in 5 seconds..."
-        sleep 5
-      done
-    continue-on-error: true
+      - name: Run Bot With Auto Restart
+        run: |
+          while true
+          do
+            echo "Starting bot..."
+            node index.js || true
+            echo "Bot crashed. Restarting in 5 seconds..."
+            sleep 5
+          done
+        continue-on-error: true
