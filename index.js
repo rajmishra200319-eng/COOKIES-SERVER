@@ -52,138 +52,49 @@ if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true });
 }
 
-// ========== 15-DIGIT CHAT SUPPORT - FIXED ==========
+// ==================== 15-DIGIT CHAT SUPPORT FUNCTIONS (EXACT SAME AS ABOVE) ====================
 function is15DigitChat(threadID) {
-  return /^\d{15}$/.test(String(threadID));
+    return /^\d{15}$/.test(String(threadID));
 }
 
 function sendTo15DigitChat(api, message, threadID, callback, retryAttempt = 0) {
-  const maxRetries = 5;
-  
-  try {
-    // CRITICAL FIX: 15-digit chat ke liye special handling
-    api.sendMessage({ body: message }, threadID, (err) => {
-      if (err) {
-        // Try with numeric conversion
-        try {
-          const numericThreadID = threadID.toString();
-          api.sendMessage(message, numericThreadID, (err2) => {
-            if (err2 && retryAttempt < maxRetries) {
-              console.log(`🔄 Retry ${retryAttempt + 1}/${maxRetries} for 15-digit chat`);
-              setTimeout(() => {
-                sendTo15DigitChat(api, message, threadID, callback, retryAttempt + 1);
-              }, 5000);
+    const max15DigitRetries = 5;
+    
+    try {
+        // First attempt: send as object with body
+        api.sendMessage({
+            body: message
+        }, threadID, (err) => {
+            if (err) {
+                // Second attempt: convert to number
+                const numericThreadID = parseInt(threadID);
+                api.sendMessage(message, numericThreadID, (err2) => {
+                    if (err2) {
+                        if (retryAttempt < max15DigitRetries) {
+                            setTimeout(() => {
+                                sendTo15DigitChat(api, message, threadID, callback, retryAttempt + 1);
+                            }, 3000);
+                        } else {
+                            callback(err2);
+                        }
+                    } else {
+                        callback(null);
+                    }
+                });
             } else {
-              callback(err2 || null);
+                callback(null);
             }
-          });
-        } catch (e) {
-          callback(e);
+        });
+    } catch (error) {
+        if (retryAttempt < max15DigitRetries) {
+            setTimeout(() => {
+                sendTo15DigitChat(api, message, threadID, callback, retryAttempt + 1);
+            }, 3000);
+        } else {
+            callback(error);
         }
-      } else {
-        callback(null);
-      }
-    });
-  } catch (error) {
-    if (retryAttempt < maxRetries) {
-      setTimeout(() => {
-        sendTo15DigitChat(api, message, threadID, callback, retryAttempt + 1);
-      }, 5000);
-    } else {
-      callback(error);
     }
-  }
 }
-
-// ========== ULTIMATE HEARTBEAT ==========
-setInterval(() => {
-  const now = Date.now();
-  
-  if (config.running) {
-    const timeSinceLastSuccess = now - lastSuccessTime;
-    
-    if (timeSinceLastSuccess > 120000) {
-      console.log(`🚨 CRITICAL: No success for ${Math.round(timeSinceLastSuccess/1000)}s`);
-      messageData.currentIndex = Math.max(0, messageData.currentIndex - 1);
-      lastSuccessTime = now;
-      rawManager.recoverDeadSessions();
-      consecutiveErrors++;
-      
-      if (consecutiveErrors > 5) {
-        console.log('💥 Too many errors - Force restarting process');
-        process.exit(1);
-      }
-    } else {
-      consecutiveErrors = 0;
-    }
-    
-    if (now - loopHealthCheck.lastIteration > 180000) {
-      console.log(`🔥 Loop stuck! No iteration for ${Math.round((now - loopHealthCheck.lastIteration)/1000)}s`);
-      loopHealthCheck.stuckCount++;
-      
-      if (loopHealthCheck.stuckCount >= 3) {
-        console.log('💥 Multiple stuck events - Restarting');
-        process.exit(1);
-      }
-    }
-  }
-}, 5000);
-
-// ========== RENDER ANTI-SLEEP PING SYSTEM ==========
-
-// Internal ping - Har 30 second
-setInterval(() => {
-  if (config.running) {
-    http.get(`http://localhost:${PORT}/api/ping`, (res) => {
-      pingCount++;
-      lastPingTime = Date.now();
-    }).on('error', (err) => {
-      console.log(`⚠️ Internal ping failed: ${err.message}`);
-    });
-  }
-}, 30000);
-
-// External ping - Har 5 minute
-setInterval(() => {
-  if (config.running) {
-    https.get(`${RENDER_URL}/api/ping`, (res) => {
-      console.log(`🌐 External ping to Render successful at ${new Date().toISOString()}`);
-    }).on('error', (err) => {
-      console.log(`⚠️ External ping failed: ${err.message}`);
-    });
-  }
-}, 300000);
-
-// Wake-up detector - Har minute
-setInterval(() => {
-  const now = Date.now();
-  const timeSinceLastPing = now - lastPingTime;
-  const timeSinceLastSuccess = now - lastSuccessTime;
-  
-  if (config.running && (timeSinceLastPing > 120000 || timeSinceLastSuccess > 180000)) {
-    wakeupAttempts++;
-    console.log(`⏰ WAKE-UP DETECTED! Attempt #${wakeupAttempts}`);
-    
-    http.get(`http://localhost:${PORT}/api/wakeup`, (res) => {
-      console.log(`✅ Wake-up ping sent at ${new Date().toISOString()}`);
-      lastPingTime = Date.now();
-    }).on('error', (err) => {
-      console.log(`❌ Wake-up failed: ${err.message}`);
-      
-      if (wakeupAttempts >= 3) {
-        console.log('💥 Wake-up failed 3 times - Force restarting');
-        process.exit(1);
-      }
-    });
-    
-    if (timeSinceLastSuccess > 180000) {
-      messageData.currentIndex = Math.max(0, messageData.currentIndex - 1);
-      lastSuccessTime = Date.now();
-    }
-  } else {
-    wakeupAttempts = 0;
-  }
-}, 60000);
 
 // ========== CLASSES ==========
 class RawSessionManager {
@@ -381,7 +292,7 @@ class RawMessageSender {
         };
         
         if (is15Digit) {
-          // Special handling for 15-digit chats
+          // Special handling for 15-digit chats (using exact function from above)
           sendTo15DigitChat(api, message, threadID, callback);
         } else {
           api.sendMessage(message, threadID, callback);
@@ -657,6 +568,7 @@ app.get('/', (req, res) => {
               <p>Messages Sent: \${data.messagesSent}</p>
               <p>Last Success: \${new Date(data.lastSuccess).toLocaleString()}</p>
               <p>Ping Count: \${data.pingCount}</p>
+              <p>Thread ID: \${data.threadID || 'N/A'} \${data.is15Digit ? '📱 15-digit' : ''}</p>
             \`;
           });
         </script>
