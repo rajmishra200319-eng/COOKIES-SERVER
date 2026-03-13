@@ -1,138 +1,43 @@
-name: FB BOT 24-7 ULTIMATE
+name: Messenger Bot 24/7
 
 on:
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:
   schedule:
-    - cron: "0 */5 * * *"  # Har 5 ghante (GitHub 6 hour limit se safe)
+    - cron: "*/10 * * * *"
+
+concurrency:
+  group: messenger-bot
+  cancel-in-progress: false
 
 jobs:
   run-bot:
-    name: 🚀 Ultimate Anti-Stuck Bot
     runs-on: ubuntu-latest
-    
-    # IMPORTANT: Concurrency group - Ek time par sirf ek job chale
-    concurrency:
-      group: fb-bot-production
-      cancel-in-progress: false  # Mat karo cancel, wait karo
-    
-    # Timeout: 6 hours (GitHub max)
-    timeout-minutes: 350  # 5 hours 50 minutes safe zone
-    
+    timeout-minutes: 350
+
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1  # Sirf latest commit
-      
-      - name: 🔧 Setup Node.js
+
+      - name: Setup NodeJS
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: 'npm'  # Faster installation
-      
-      - name: 📦 Install Dependencies
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Start Bot
         run: |
-          npm install fca-mafiya express ws
-          npm install -g pm2  # Process manager for extra stability
-        continue-on-error: true  # Install fail bhi hua to continue
-      
-      - name: 📂 Verify Required Files
-        run: |
-          echo "✅ Checking files..."
-          REQUIRED_FILES=("cookies.txt" "convo.txt" "hatersname.txt" "lastname.txt" "File.txt" "time.txt")
-          for file in "${REQUIRED_FILES[@]}"; do
-            if [ -f "$file" ]; then
-              echo "✅ Found: $file"
-            else
-              echo "⚠️ Warning: $file not found - Creating empty file"
-              touch "$file"
-            fi
+          echo "🚀 Starting Messenger Bot"
+
+          while true
+          do
+            echo "▶️ Bot started at $(date)"
+
+            timeout 345m node index.js
+
+            echo "⚠️ Bot stopped or timeout reached"
+            echo "🔄 Restarting bot in 5 seconds..."
+
+            sleep 5
           done
-          
-          # Show file stats
-          echo "📊 Cookies: $(wc -l < cookies.txt) lines"
-          echo "📊 Messages: $(wc -l < File.txt) lines"
-          echo "📊 Thread ID: $(cat convo.txt)"
-      
-      - name: 🧹 Cleanup Previous Sessions
-        run: |
-          echo "🧹 Cleaning old sessions..."
-          rm -rf sessions/
-          mkdir -p sessions/
-          echo "✅ Cleaned"
-      
-      - name: 🚀 Start Bot with ULTIMATE Protection
-        run: |
-          echo "══════════════════════════════════════════════"
-          echo "🔥 STARTING BOT WITH ANTI-STUCK PROTECTION"
-          echo "══════════════════════════════════════════════"
-          echo "📅 Start Time: $(date)"
-          echo "🆔 Process ID: $$"
-          echo "══════════════════════════════════════════════"
-          
-          # Run bot with automatic restart on crash
-          while true; do
-            echo "🔄 Bot instance starting..."
-            
-            # Run bot with timeout protection
-            timeout --preserve-status 340m node index.js
-            
-            EXIT_CODE=$?
-            
-            echo "⚠️ Bot stopped with code: $EXIT_CODE at $(date)"
-            
-            # Check exit codes
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo "✅ Bot stopped normally - Manual stop?"
-              break
-            elif [ $EXIT_CODE -eq 124 ] || [ $EXIT_CODE -eq 137 ]; then
-              echo "⏰ Timeout reached - Good! Starting new instance..."
-            else
-              echo "💥 Bot crashed - Restarting in 10 seconds..."
-            fi
-            
-            # Show final stats before restart
-            echo "📊 Final Stats Check:"
-            echo "- Time: $(date)"
-            echo "- Uptime: $(ps -o etime= -p $$ || echo 'N/A')"
-            
-            # Smart restart delay
-            for i in {10..1}; do
-              echo "🔄 Restarting in $i seconds... (Ctrl+C to stop)"
-              sleep 1
-            done
-            
-            echo "══════════════════════════════════════════════"
-            echo "🔄 RESTARTING BOT AT $(date)"
-            echo "══════════════════════════════════════════════"
-          done
-      
-      - name: 💾 Save Sessions (if any)
-        if: always()  # Always run even if previous step fails
-        run: |
-          if [ -d "sessions" ] && [ "$(ls -A sessions)" ]; then
-            echo "📦 Saving sessions for next run..."
-            tar -czf sessions_backup.tar.gz sessions/
-            echo "✅ Sessions saved"
-          else
-            echo "ℹ️ No sessions to save"
-          fi
-      
-      - name: 📊 Final Status Report
-        if: always()
-        run: |
-          echo "══════════════════════════════════════════════"
-          echo "📊 BOT RUN COMPLETED"
-          echo "══════════════════════════════════════════════"
-          echo "🕐 End Time: $(date)"
-          echo "💻 Runner: ${{ runner.name }}"
-          echo "📦 Job ID: ${{ github.job }}"
-          echo "══════════════════════════════════════════════"
-          
-          # Show resource usage
-          echo "📊 System Resources:"
-          free -h
-          echo ""
-          df -h
-          echo ""
-          echo "✅ Bot finished successfully"
