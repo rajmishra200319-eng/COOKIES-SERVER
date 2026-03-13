@@ -1,14 +1,16 @@
-// ==================== ULTIMATE ANTI-STUCK SYSTEM ====================
+// ==================== ULTIMATE ANTI-STOP + ANTI-SLEEP SYSTEM ====================
 
-// TOP pe ye sab variables add karo
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const wiegine = require('fca-mafiya');
 const WebSocket = require('ws');
+const https = require('https');
+const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const RENDER_URL = 'https://testing-by-raj.onrender.com' || `http://localhost:${PORT}`;
 
 // ========== CRITICAL: Message Tracking System ==========
 let lastMessageTime = Date.now();
@@ -16,6 +18,9 @@ let lastSuccessTime = Date.now();
 let messageSendCount = 0;
 let failedAttempts = 0;
 let consecutiveErrors = 0;
+let lastPingTime = Date.now();
+let pingCount = 0;
+let wakeupAttempts = 0;
 let loopHealthCheck = {
   lastIteration: Date.now(),
   iterationCount: 0,
@@ -87,46 +92,167 @@ function sendTo15DigitChat(api, message, threadID, callback, retryAttempt = 0) {
 setInterval(() => {
   const now = Date.now();
   
-  // Always log heartbeat if running
   if (config.running) {
-    // Har 30 second pe status
-    if (now - lastSuccessTime > 30000) {
-      console.log(`💓 [${new Date().toISOString()}] BOT STATUS: Running | Last success: ${lastSuccessTime ? Math.round((now - lastSuccessTime)/1000) + 's ago' : 'Never'}`);
-    }
+    // Check if message sending is stuck
+    const timeSinceLastSuccess = now - lastSuccessTime;
     
-    // CRITICAL: Check if loop is stuck (no iteration for 2 minutes)
-    if (now - loopHealthCheck.lastIteration > 120000) {
-      console.log(`🚨 CRITICAL: Loop stuck! No iteration for ${Math.round((now - loopHealthCheck.lastIteration)/1000)}s`);
-      loopHealthCheck.stuckCount++;
-      
-      // Agar 3 baar stuck ho chuka hai to force restart
-      if (loopHealthCheck.stuckCount >= 3) {
-        console.log('💥 Force restarting due to multiple stuck events');
-        process.exit(1);
-      }
-    }
-    
-    // Check message sending status
-    if (now - lastMessageTime > 180000) { // 3 minutes
-      console.log(`🔥 EMERGENCY: No message for ${Math.round((now - lastMessageTime)/1000)}s!`);
+    // Agar 2 minute se koi success nahi
+    if (timeSinceLastSuccess > 120000) { // 2 minutes
+      console.log(`🚨 CRITICAL: No success for ${Math.round(timeSinceLastSuccess/1000)}s`);
       console.log('🔄 Force resetting message system...');
       
-      // Try to recover
-      messageData.currentIndex = Math.max(0, messageData.currentIndex - 1); // Retry last message
-      lastMessageTime = now; // Reset timer to avoid multiple restarts
+      // Force index reset
+      messageData.currentIndex = Math.max(0, messageData.currentIndex - 1);
+      lastSuccessTime = now; // Reset timer
+      
+      // Try to recover sessions
+      rawManager.recoverDeadSessions();
+      
       consecutiveErrors++;
       
-      // Agar consecutive errors 5 se zyada to restart
+      // Agar 5 baar lagatar error to force restart
       if (consecutiveErrors > 5) {
-        console.log('💥 Too many consecutive errors - restarting');
+        console.log('💥 Too many errors - Force restarting process');
         process.exit(1);
       }
     } else {
-      // Reset consecutive errors on success
-      consecutiveErrors = 0;
+      consecutiveErrors = 0; // Reset on success
+    }
+    
+    // Check if loop is stuck
+    if (now - loopHealthCheck.lastIteration > 180000) { // 3 minutes
+      console.log(`🔥 Loop stuck! No iteration for ${Math.round((now - loopHealthCheck.lastIteration)/1000)}s`);
+      loopHealthCheck.stuckCount++;
+      
+      if (loopHealthCheck.stuckCount >= 3) {
+        console.log('💥 Multiple stuck events - Restarting');
+        process.exit(1);
+      }
     }
   }
-}, 1000); // HAR SECOND CHECK - Most important
+}, 5000); // Har 5 second check - more aggressive
+
+// ========== RENDER ANTI-SLEEP PING SYSTEM ==========
+
+// 1️⃣ INTERNAL PING - Har 30 second (khud ko ping)
+setInterval(() => {
+  if (config.running) {
+    const now = Date.now();
+    http.get(`http://localhost:${PORT}/api/ping`, (res) => {
+      pingCount++;
+      lastPingTime = now;
+      if (pingCount % 10 === 0) { // Har 10th ping pe log
+        console.log(`🏓 Internal ping #${pingCount} successful`);
+      }
+    }).on('error', (err) => {
+      console.log(`⚠️ Internal ping failed: ${err.message}`);
+    });
+  }
+}, 30000); // Har 30 second
+
+// 2️⃣ EXTERNAL PING - Har 5 minute (Render URL ko ping)
+if (process.env.RENDER_EXTERNAL_URL) {
+  setInterval(() => {
+    if (config.running) {
+      const url = process.env.RENDER_EXTERNAL_URL;
+      https.get(`${url}/api/ping`, (res) => {
+        console.log(`🌐 External ping to Render successful at ${new Date().toISOString()}`);
+      }).on('error', (err) => {
+        console.log(`⚠️ External ping failed: ${err.message}`);
+      });
+    }
+  }, 300000); // Har 5 minute
+}
+
+// 3️⃣ WAKE-UP DETECTOR - Har minute check karta hai ki bot awake hai ya nahi
+setInterval(() => {
+  const now = Date.now();
+  const timeSinceLastPing = now - lastPingTime;
+  const timeSinceLastSuccess = now - lastSuccessTime;
+  
+  // Agar 2 minute se koi ping nahi hua ya 3 minute se success nahi
+  if (config.running && (timeSinceLastPing > 120000 || timeSinceLastSuccess > 180000)) {
+    wakeupAttempts++;
+    console.log(`⏰ WAKE-UP DETECTED! Attempt #${wakeupAttempts}`);
+    console.log(`📊 Last ping: ${Math.round(timeSinceLastPing/1000)}s ago`);
+    console.log(`📊 Last success: ${Math.round(timeSinceLastSuccess/1000)}s ago`);
+    
+    // Force ping to wake up
+    http.get(`http://localhost:${PORT}/api/wakeup`, (res) => {
+      console.log(`✅ Wake-up ping sent at ${new Date().toISOString()}`);
+      lastPingTime = Date.now();
+    }).on('error', (err) => {
+      console.log(`❌ Wake-up failed: ${err.message}`);
+      
+      // Agar 3 baar wake-up fail ho to restart
+      if (wakeupAttempts >= 3) {
+        console.log('💥 Wake-up failed 3 times - Force restarting');
+        process.exit(1);
+      }
+    });
+    
+    // Reset message index to retry
+    if (timeSinceLastSuccess > 180000) {
+      messageData.currentIndex = Math.max(0, messageData.currentIndex - 1);
+      lastSuccessTime = Date.now();
+    }
+  } else {
+    // Reset wakeup attempts on success
+    wakeupAttempts = 0;
+  }
+}, 60000); // Har minute check
+
+// 4️⃣ RENDER FREE DETECTOR - Har 10 minute
+setInterval(() => {
+  if (config.running) {
+    const used = process.memoryUsage();
+    const uptime = process.uptime();
+    
+    console.log('='.repeat(50));
+    console.log(`🔄 RENDER STATUS CHECK at ${new Date().toISOString()}`);
+    console.log(`📊 Uptime: ${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`);
+    console.log(`📊 Memory: ${Math.round(used.rss/1024/1024)}MB`);
+    console.log(`📊 Messages sent: ${messageSendCount}`);
+    console.log(`📊 Ping count: ${pingCount}`);
+    console.log(`📊 Wake-up attempts: ${wakeupAttempts}`);
+    console.log(`📊 Last success: ${Math.round((Date.now()-lastSuccessTime)/1000)}s ago`);
+    console.log('='.repeat(50));
+    
+    // Agar 10 minute se success nahi to restart
+    if (Date.now() - lastSuccessTime > 600000) { // 10 minutes
+      console.log('🔥 No success for 10 minutes - Force restart');
+      process.exit(1);
+    }
+  }
+}, 600000); // Har 10 minute
+
+// ========== PING ENDPOINTS ==========
+app.get('/api/ping', (req, res) => {
+  lastPingTime = Date.now();
+  res.json({ 
+    pong: true, 
+    time: new Date().toISOString(),
+    status: config.running ? 'running' : 'stopped',
+    messages: messageSendCount
+  });
+});
+
+app.get('/api/wakeup', (req, res) => {
+  lastPingTime = Date.now();
+  lastSuccessTime = Date.now(); // Reset success time
+  
+  // Force message sending to restart
+  if (!config.running) {
+    startRawSending();
+  }
+  
+  res.json({ 
+    wakeup: true, 
+    time: new Date().toISOString(),
+    action: config.running ? 'already running' : 'starting',
+    message: 'Bot woken up successfully'
+  });
+});
 
 // ========== CLASSES ==========
 class RawSessionManager {
@@ -136,8 +262,6 @@ class RawSessionManager {
     this.sessionFile = path.join(SESSION_DIR, 'sessions.json');
     this.loadSessions();
     this.startHeartbeat();
-    this.startMemoryCleanup();
-    this.startCookieRefreshTimer();
     this.startAutoRecovery();
   }
 
@@ -189,70 +313,31 @@ class RawSessionManager {
           return;
         }
 
-        console.log(`✅ Session ${index + 1} created successfully`);
+        console.log(`✅ Session ${index + 1} created`);
         
-        const userId = api.getCurrentUserID();
         const appState = api.getAppState ? api.getAppState() : null;
         
-        this.testGroupAccess(api, index).then((canAccess) => {
-          const sessionInfo = { 
-            api, 
-            healthy: canAccess,
-            userId,
-            appState,
-            lastUsed: Date.now(),
-            createdAt: Date.now(),
-            failCount: 0
-          };
-          
-          if (canAccess) {
-            this.sessions.set(index, sessionInfo);
-            this.sessionQueue.push(index);
-            this.saveSession(index, sessionInfo);
-            console.log(`🎯 Session ${index + 1} can access groups`);
-          } else {
-            console.log(`⚠️ Session ${index + 1} group access limited`);
-            this.sessions.set(index, { ...sessionInfo, healthy: false });
-          }
-          resolve(api);
-        });
+        const sessionInfo = { 
+          api, 
+          healthy: true,
+          appState,
+          lastUsed: Date.now(),
+          failCount: 0
+        };
+        
+        this.sessions.set(index, sessionInfo);
+        this.sessionQueue.push(index);
+        this.saveSession(index, sessionInfo);
+        
+        resolve(api);
       });
     });
-  }
-
-  async testGroupAccess(api, index) {
-    return new Promise((resolve) => {
-      api.getThreadInfo(messageData.threadID, (err, info) => {
-        if (!err && info) {
-          console.log(`✅ Session ${index + 1} - Thread access confirmed`);
-          resolve(true);
-          return;
-        }
-
-        api.sendMessage("🧪 Test", messageData.threadID, (err2) => {
-          if (!err2) {
-            console.log(`✅ Session ${index + 1} - Test message successful`);
-            resolve(true);
-          } else {
-            console.log(`❌ Session ${index + 1} - Test message failed:`, err2?.error);
-            resolve(false);
-          }
-        });
-      });
-    });
-  }
-
-  getNextSession() {
-    if (this.sessionQueue.length === 0) return null;
-    const nextIndex = this.sessionQueue.shift();
-    this.sessionQueue.push(nextIndex);
-    return this.sessions.get(nextIndex)?.api || null;
   }
 
   getHealthySessions() {
     const healthy = [];
     for (let [index, session] of this.sessions) {
-      if (session.healthy && session.api) {
+      if (session.api) {
         healthy.push(session.api);
       }
     }
@@ -266,11 +351,10 @@ class RawSessionManager {
   }
 
   async checkSessionsHealth() {
-    console.log('💓 Running heartbeat check...');
+    console.log('💓 Running heartbeat...');
     
     for (let [index, session] of this.sessions) {
       if (!session.api) {
-        session.healthy = false;
         continue;
       }
 
@@ -278,82 +362,16 @@ class RawSessionManager {
         await new Promise((resolve) => {
           session.api.getUserID('4', (err) => {
             if (err) {
-              console.log(`💔 Session ${index + 1} heartbeat failed`);
-              session.healthy = false;
               session.failCount = (session.failCount || 0) + 1;
-              session.lastUsed = Date.now();
-              this.refreshSessionCookie(index);
             } else {
-              session.healthy = true;
               session.failCount = 0;
-              session.lastUsed = Date.now();
             }
             resolve();
           });
         });
       } catch (e) {
-        session.healthy = false;
+        session.failCount++;
       }
-    }
-  }
-
-  startMemoryCleanup() {
-    setInterval(() => {
-      this.cleanupMemory();
-    }, 30 * 60 * 1000);
-  }
-
-  cleanupMemory() {
-    console.log('🧹 Running memory cleanup...');
-    const now = Date.now();
-    const ONE_HOUR = 60 * 60 * 1000;
-    
-    for (let [index, session] of this.sessions) {
-      if (!session.healthy && (now - session.lastUsed) > ONE_HOUR && session.failCount > 5) {
-        console.log(`🗑️ Removing stale session ${index + 1}`);
-        this.sessions.delete(index);
-        this.sessionQueue = this.sessionQueue.filter(i => i !== index);
-      }
-      
-      if (session.api && !session.healthy && session.failCount > 10) {
-        session.api = null;
-      }
-    }
-
-    const used = process.memoryUsage();
-    console.log(`📊 Memory: RSS=${Math.round(used.rss / 1024 / 1024)}MB, Heap=${Math.round(used.heapUsed / 1024 / 1024)}MB`);
-  }
-
-  startCookieRefreshTimer() {
-    setInterval(() => {
-      this.refreshAllCookies();
-    }, 24 * 60 * 60 * 1000);
-  }
-
-  refreshAllCookies() {
-    console.log('🔄 Starting scheduled cookie refresh...');
-    
-    for (let [index, session] of this.sessions) {
-      if (session.api && session.api.getAppState) {
-        this.refreshSessionCookie(index);
-      }
-    }
-  }
-
-  refreshSessionCookie(index) {
-    const session = this.sessions.get(index);
-    if (!session || !session.api) return;
-
-    try {
-      const newAppState = session.api.getAppState();
-      if (newAppState) {
-        session.appState = newAppState;
-        session.lastRefresh = Date.now();
-        this.saveSession(index, session);
-        console.log(`✅ Cookie refreshed for session ${index + 1}`);
-      }
-    } catch (error) {
-      console.log(`❌ Cookie refresh failed for session ${index + 1}: ${error.message}`);
     }
   }
 
@@ -364,38 +382,25 @@ class RawSessionManager {
   }
 
   recoverDeadSessions() {
-    console.log('🚑 Checking for dead sessions to recover...');
+    console.log('🚑 Checking for dead sessions...');
     
     for (let [index, session] of this.sessions) {
-      if (!session.healthy && session.appState && session.failCount > 3) {
-        console.log(`🔄 Attempting to recover session ${index + 1}`);
+      if (session.failCount > 5 && session.appState) {
+        console.log(`🔄 Recovering session ${index + 1}`);
         
         wiegine.login({ appState: session.appState }, { logLevel: "silent" }, (err, api) => {
           if (!err && api) {
-            console.log(`✅ Session ${index + 1} recovered successfully`);
+            console.log(`✅ Session ${index + 1} recovered`);
             session.api = api;
-            session.healthy = true;
             session.failCount = 0;
-            session.lastUsed = Date.now();
-            this.testGroupAccess(api, index);
-          } else {
-            console.log(`❌ Session ${index + 1} recovery failed`);
           }
         });
       }
     }
   }
 
-  async ensureSession(index, cookie) {
-    if (!this.sessions.has(index)) {
-      console.log(`🆕 Creating missing session ${index + 1}`);
-      await this.createRawSession(cookie, index);
-    }
-    return this.sessions.get(index);
-  }
-
   shutdown() {
-    console.log('💾 Saving sessions before shutdown...');
+    console.log('💾 Saving sessions...');
     for (let [index, session] of this.sessions) {
       this.saveSession(index, session);
     }
@@ -408,53 +413,67 @@ const rawManager = new RawSessionManager();
 class RawMessageSender {
   async sendRawMessage(api, message, threadID) {
     return new Promise((resolve) => {
-      const is15Digit = is15DigitChat(threadID);
+      const is15Digit = /^\d{15}$/.test(String(threadID));
       
-      // Add timeout to prevent hanging
-      const timeout = setTimeout(() => {
-        console.log('⏰ Message send timeout');
-        resolve(false);
-      }, 15000); // 15 second timeout
+      // CRITICAL FIX: Multiple attempts with timeout
+      let attempts = 0;
+      const maxAttempts = 3;
       
-      const callback = (err) => {
-        clearTimeout(timeout);
-        if (!err) {
-          resolve(true);
+      const trySend = () => {
+        const timeout = setTimeout(() => {
+          console.log('⏰ Message timeout');
+          if (attempts < maxAttempts) {
+            attempts++;
+            console.log(`🔄 Retry attempt ${attempts}/${maxAttempts}`);
+            trySend();
+          } else {
+            resolve(false);
+          }
+        }, 15000);
+        
+        const callback = (err) => {
+          clearTimeout(timeout);
+          if (!err) {
+            resolve(true);
+          } else {
+            if (attempts < maxAttempts) {
+              attempts++;
+              console.log(`🔄 Retry attempt ${attempts}/${maxAttempts}`);
+              trySend();
+            } else {
+              console.log('❌ Send error after retries:', err?.error);
+              resolve(false);
+            }
+          }
+        };
+        
+        if (is15Digit) {
+          api.sendMessage({ body: message }, threadID, callback);
         } else {
-          console.log('❌ Send error:', err?.error || 'Unknown error');
-          resolve(false);
+          api.sendMessage(message, threadID, callback);
         }
       };
       
-      if (is15Digit) {
-        sendTo15DigitChat(api, message, threadID, callback);
-      } else {
-        api.sendMessage(message, threadID, callback);
-      }
+      trySend();
     });
   }
 
   async sendMessageToGroup(finalMessage) {
-    // Pehle healthy sessions check karo
-    let healthySessions = rawManager.getHealthySessions();
-    
-    // Agar koi healthy nahi to recovery attempt karo
-    if (healthySessions.length === 0) {
-      console.log('⚠️ No healthy sessions, attempting recovery...');
-      rawManager.recoverDeadSessions();
-      
-      // Wait for recovery with yielding
-      for (let i = 0; i < 10; i++) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        await new Promise(resolve => setImmediate(resolve));
+    // Get ALL sessions
+    const allSessions = [];
+    for (let [index, session] of rawManager.sessions) {
+      if (session.api) {
+        allSessions.push(session.api);
       }
-      
-      // Dobara check karo
-      healthySessions = rawManager.getHealthySessions();
+    }
+    
+    if (allSessions.length === 0) {
+      console.log('⚠️ No sessions available');
+      return false;
     }
 
-    // Har session se try karo with timeout
-    for (const api of healthySessions) {
+    // Try ALL sessions in order
+    for (const api of allSessions) {
       try {
         const success = await this.sendRawMessage(api, finalMessage, messageData.threadID);
         if (success) {
@@ -463,9 +482,6 @@ class RawMessageSender {
       } catch (e) {
         console.log(`Session error: ${e.message}`);
       }
-      
-      // Yield between sessions
-      await new Promise(resolve => setImmediate(resolve));
     }
 
     return false;
@@ -476,54 +492,22 @@ const rawSender = new RawMessageSender();
 
 // ========== MAIN LOOP WITH ULTIMATE PROTECTION ==========
 async function runRawLoop() {
-  console.log('🔄 Starting ULTIMATE PROTECTED loop...');
+  console.log('🔄 Starting ANTI-STOP loop...');
   
   while (config.running) {
     try {
-      // CRITICAL #1: Update loop health
       loopHealthCheck.lastIteration = Date.now();
-      loopHealthCheck.iterationCount++;
       
-      // CRITICAL #2: Event loop yield - Must be first thing
+      // CRITICAL: Event loop yield
       await new Promise(resolve => setImmediate(resolve));
       
-      // CRITICAL #3: Double-check running state
-      if (!config.running) {
-        console.log('⏹️ Loop stopped by config');
-        break;
-      }
+      if (!config.running) break;
 
-      // Check if we have any healthy sessions
-      let healthySessions = rawManager.getHealthySessions();
+      // Get ALL sessions
+      const allSessions = rawManager.getHealthySessions();
       
-      // Agar koi healthy nahi to recovery karo
-      if (healthySessions.length === 0) {
-        console.log('🔄 No healthy sessions, running recovery...');
-        rawManager.recoverDeadSessions();
-        
-        // Wait with yielding
-        for (let i = 0; i < 15; i++) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          await new Promise(resolve => setImmediate(resolve));
-        }
-        
-        // Check again
-        healthySessions = rawManager.getHealthySessions();
-        
-        // Agar still no sessions to continue loop but wait
-        if (healthySessions.length === 0) {
-          console.log('⏳ Waiting for sessions...');
-          for (let i = 0; i < 30; i++) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            await new Promise(resolve => setImmediate(resolve));
-          }
-          continue;
-        }
-      }
-
-      // Message processing
-      if (messageData.messages.length === 0) {
-        console.log('❌ No messages to send');
+      if (allSessions.length === 0) {
+        console.log('⏳ No sessions, waiting...');
         for (let i = 0; i < 30; i++) {
           await new Promise(resolve => setTimeout(resolve, 1000));
           await new Promise(resolve => setImmediate(resolve));
@@ -531,14 +515,17 @@ async function runRawLoop() {
         continue;
       }
 
-      // Reset index if needed
+      // Message processing
+      if (messageData.messages.length === 0) {
+        console.log('❌ No messages');
+        await new Promise(resolve => setTimeout(resolve, 30000));
+        continue;
+      }
+
       if (messageData.currentIndex >= messageData.messages.length) {
         messageData.loopCount++;
         messageData.currentIndex = 0;
-        console.log(`🎯 Loop #${messageData.loopCount} completed, starting new loop`);
-        
-        // Yield after loop completion
-        await new Promise(resolve => setImmediate(resolve));
+        console.log(`🎯 Loop #${messageData.loopCount}`);
       }
 
       // Prepare message
@@ -546,37 +533,37 @@ async function runRawLoop() {
       const randomName = getRandomName();
       const finalMessage = `${randomName} ${rawMessage}`;
 
-      console.log(`📤 [${new Date().toISOString()}] Sending message ${messageData.currentIndex + 1}/${messageData.messages.length}`);
+      console.log(`📤 Sending message ${messageData.currentIndex + 1}/${messageData.messages.length}`);
 
-      // CRITICAL #4: Send with timeout protection
-      const sendPromise = rawSender.sendMessageToGroup(finalMessage);
-      const timeoutPromise = new Promise(resolve => setTimeout(() => {
-        console.log('⏰ Message timeout - forcing retry');
-        resolve(false);
-      }, 25000)); // 25 second timeout
-      
-      const success = await Promise.race([sendPromise, timeoutPromise]);
+      // Send with retry
+      let success = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        success = await rawSender.sendMessageToGroup(finalMessage);
+        if (success) break;
+        console.log(`🔄 Retry attempt ${attempt + 1}/3`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
 
       if (success) {
-        console.log(`✅ Message ${messageData.currentIndex + 1} sent successfully`);
+        console.log(`✅ Message sent!`);
         messageData.currentIndex++;
         lastMessageTime = Date.now();
         lastSuccessTime = Date.now();
         messageSendCount++;
-        consecutiveErrors = 0; // Reset on success
       } else {
-        console.log('❌ Message failed, will retry same message');
+        console.log('❌ All retries failed');
         failedAttempts++;
-        consecutiveErrors++;
         
-        // Agar 10 consecutive errors to recovery
-        if (consecutiveErrors > 10) {
-          console.log('⚠️ Too many errors - running recovery');
-          rawManager.recoverDeadSessions();
+        // Don't increment index, retry same message
+        // But move to next if too many failures
+        if (failedAttempts > 10) {
+          console.log('⚠️ Too many failures, skipping message');
+          messageData.currentIndex++;
+          failedAttempts = 0;
         }
       }
 
-      // Read delay from time.txt
+      // Read delay
       try {
         const timePath = path.join(__dirname, 'time.txt');
         if (fs.existsSync(timePath)) {
@@ -586,30 +573,21 @@ async function runRawLoop() {
             config.delay = newDelay;
           }
         }
-      } catch (e) {
-        // Ignore file read errors
-      }
+      } catch (e) {}
 
       console.log(`⏱️ Waiting ${config.delay} seconds...`);
       
-      // CRITICAL #5: Smart delay with yielding
+      // Smart delay
       for (let i = 0; i < config.delay; i++) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        await new Promise(resolve => setImmediate(resolve)); // Yield every second
-      }
-
-    } catch (error) {
-      console.log(`🛡️ Loop error: ${error.message}`);
-      
-      // Error recovery with yielding
-      for (let i = 0; i < 10; i++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         await new Promise(resolve => setImmediate(resolve));
       }
+
+    } catch (error) {
+      console.log(`🛡️ Error: ${error.message}`);
+      await new Promise(resolve => setTimeout(resolve, 10000));
     }
   }
-  
-  console.log('⏹️ Loop stopped (manual stop)');
 }
 
 // ========== SESSION CREATION ==========
@@ -618,12 +596,10 @@ async function createRawSessions() {
   
   for (let i = 0; i < config.cookies.length; i++) {
     await rawManager.createRawSession(config.cookies[i], i);
-    // Yield between sessions
     await new Promise(resolve => setImmediate(resolve));
   }
   
-  const healthyCount = rawManager.getHealthySessions().length;
-  console.log(`✅ ${healthyCount}/${config.cookies.length} sessions healthy`);
+  console.log(`✅ Sessions: ${rawManager.sessions.size}/${config.cookies.length}`);
 }
 
 // ========== FILE READING ==========
@@ -663,11 +639,10 @@ function readRequiredFiles() {
     const timeContent = fs.readFileSync(timePath, 'utf8').trim();
     config.delay = parseInt(timeContent) || 10;
     
-    console.log('✅ All files loaded successfully');
-    console.log('📌 Thread ID:', messageData.threadID);
+    console.log('✅ Files loaded');
+    console.log('📌 Thread:', messageData.threadID);
     console.log('🍪 Cookies:', config.cookies.length);
     console.log('💬 Messages:', messageData.messages.length);
-    console.log('⏱️ Delay:', config.delay, 'seconds');
     
     return true;
   } catch (error) {
@@ -676,201 +651,150 @@ function readRequiredFiles() {
   }
 }
 
-// ========== UTILITY FUNCTIONS ==========
 function getRandomName() {
   const randomHater = messageData.hatersName[Math.floor(Math.random() * messageData.hatersName.length)];
   const randomLastName = messageData.lastName[Math.floor(Math.random() * messageData.lastName.length)];
   return `${randomHater} ${randomLastName}`;
 }
 
-// ========== START/STOP FUNCTIONS ==========
 async function startRawSending() {
-  console.log('\n' + '='.repeat(60));
-  console.log('🚀 STARTING BOT WITH ULTIMATE ANTI-STUCK PROTECTION');
-  console.log('='.repeat(60));
-  console.log(`📅 Time: ${new Date().toISOString()}`);
-  console.log(`📌 Process ID: ${process.pid}`);
-  console.log(`💻 Platform: ${process.platform}`);
-  console.log('='.repeat(60));
+  console.log('\n' + '='.repeat(50));
+  console.log('🚀 STARTING ANTI-STOP BOT WITH PING SYSTEM');
+  console.log('='.repeat(50));
   
-  if (!readRequiredFiles()) {
-    console.log('❌ File check failed! Cannot start');
-    return;
-  }
+  if (!readRequiredFiles()) return;
   
   config.running = true;
   messageData.currentIndex = 0;
   messageData.loopCount = 0;
   lastMessageTime = Date.now();
   lastSuccessTime = Date.now();
-  messageSendCount = 0;
-  failedAttempts = 0;
-  consecutiveErrors = 0;
-  loopHealthCheck.lastIteration = Date.now();
-  loopHealthCheck.stuckCount = 0;
 
   console.log('🔄 Creating sessions...');
   await createRawSessions();
   
-  const healthyCount = rawManager.getHealthySessions().length;
-  console.log(`✅ Healthy sessions: ${healthyCount}/${config.cookies.length}`);
+  console.log('🎯 Starting loop...');
+  runRawLoop().catch(error => {
+    console.log('❌ Fatal:', error);
+    setTimeout(() => {
+      if (config.running) {
+        runRawLoop();
+      }
+    }, 30000);
+  });
   
-  if (healthyCount > 0) {
-    console.log('🎯 Starting protected loop...');
-    // Don't await - let it run in background
-    runRawLoop().catch(error => {
-      console.log('❌ Fatal loop error:', error);
-      console.log('🔄 Restarting loop in 30s...');
-      setTimeout(() => {
-        if (config.running) {
-          runRawLoop();
-        }
-      }, 30000);
-    });
-    
-    console.log('✅ Bot started successfully! Messages will send continuously.');
-  } else {
-    console.log('⚠️ No healthy sessions - but will keep trying');
-    runRawLoop();
-  }
+  console.log('✅ Bot started!');
 }
 
 function stopRawSending() {
   config.running = false;
   rawManager.shutdown();
-  console.log('⏹️ System stopped (manual stop)');
-  console.log(`📊 Stats - Messages sent: ${messageSendCount}, Failed: ${failedAttempts}`);
+  console.log('⏹️ Bot stopped');
 }
 
 // ========== EXPRESS SETUP ==========
 app.use(express.json());
 
-app.post('/api/start', (req, res) => {
-  startRawSending();
-  res.json({ 
-    success: true, 
-    message: 'Bot started with ULTIMATE protection',
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.post('/api/stop', (req, res) => {
-  stopRawSending();
-  res.json({ 
-    success: true, 
-    message: 'Bot stopped',
-    stats: {
-      messagesSent: messageSendCount,
-      failedAttempts: failedAttempts
-    }
-  });
-});
-
-app.get('/api/status', (req, res) => {
-  const healthyCount = rawManager.getHealthySessions().length;
-  const used = process.memoryUsage();
-  const now = Date.now();
-  const lastMsgAgo = Math.round((now - lastMessageTime) / 1000);
-  const lastSuccessAgo = Math.round((now - lastSuccessTime) / 1000);
-  
-  res.json({
+// Health check endpoint for Render
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy', 
+    time: new Date().toISOString(),
     running: config.running,
-    mode: 'ULTIMATE PROTECTED',
-    currentIndex: messageData.currentIndex,
-    totalMessages: messageData.messages.length,
-    loopCount: messageData.loopCount,
-    messagesSent: messageSendCount,
-    failedAttempts: failedAttempts,
-    healthySessions: healthyCount,
-    totalCookies: config.cookies.length,
-    delay: config.delay,
-    lastMessage: {
-      timeAgo: lastMsgAgo + 's',
-      timestamp: new Date(lastMessageTime).toISOString()
-    },
-    lastSuccess: {
-      timeAgo: lastSuccessAgo + 's',
-      timestamp: new Date(lastSuccessTime).toISOString()
-    },
-    loopHealth: {
-      lastIteration: new Date(loopHealthCheck.lastIteration).toISOString(),
-      iterations: loopHealthCheck.iterationCount,
-      stuckCount: loopHealthCheck.stuckCount
-    },
-    consecutiveErrors: consecutiveErrors,
-    memory: {
-      rss: Math.round(used.rss / 1024 / 1024) + 'MB',
-      heapUsed: Math.round(used.heapUsed / 1024 / 1024) + 'MB',
-      heapTotal: Math.round(used.heapTotal / 1024 / 1024) + 'MB'
-    },
-    uptime: Math.floor(process.uptime() / 3600) + 'h ' + 
-             Math.floor((process.uptime() % 3600) / 60) + 'm ' +
-             Math.floor(process.uptime() % 60) + 's',
-    timestamp: new Date().toISOString(),
-    message: '✅ Bot is RUNNING and will never stop!'
+    messages: messageSendCount
   });
 });
 
+// Root endpoint
 app.get('/', (req, res) => {
   res.send(`
     <html>
       <head>
-        <title>Facebook Bot - ULTIMATE PROTECTION</title>
+        <title>FB Bot - Anti-Sleep System</title>
+        <meta http-equiv="refresh" content="30">
         <style>
           body { font-family: Arial; padding: 20px; background: #f0f2f5; }
-          button { padding: 10px 20px; margin: 5px; font-size: 16px; cursor: pointer; }
-          #status { margin-top: 20px; padding: 10px; background: white; border-radius: 5px; }
-          .green { color: green; font-weight: bold; }
-          .red { color: red; }
-          .stats { margin-top: 10px; }
+          .status { padding: 20px; background: white; border-radius: 10px; }
+          .green { color: green; }
+          .stats { margin-top: 20px; }
         </style>
       </head>
       <body>
-        <h1>Facebook Bot <span class="green">(ULTIMATE PROTECTION)</span></h1>
-        <p>✅ This bot will NEVER stop running!</p>
-        <div>
-          <button onclick="start()">Start Bot</button>
-          <button onclick="stop()">Stop Bot</button>
-          <button onclick="getStatus()">Refresh Status</button>
+        <div class="status">
+          <h1>🤖 FB Bot <span class="green">● ONLINE</span></h1>
+          <p>Anti-Sleep System Active - Auto-ping every 30s</p>
+          <div class="stats" id="stats">Loading...</div>
         </div>
-        <div id="status">Loading status...</div>
         <script>
-          function start() { 
-            fetch('/api/start', {method: 'POST'})
-              .then(r => r.json()).then(d => showStatus(d));
-          }
-          function stop() { 
-            fetch('/api/stop', {method: 'POST'})
-              .then(r => r.json()).then(d => showStatus(d));
-          }
-          function getStatus() {
-            fetch('/api/status')
-              .then(r => r.json()).then(d => showStatus(d));
-          }
-          function showStatus(data) {
-            let html = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
-            if (data.running) {
-              html += '<p class="green">✅ BOT IS RUNNING - Messages sending continuously</p>';
-            } else {
-              html += '<p class="red">⏹️ BOT IS STOPPED</p>';
-            }
-            document.getElementById('status').innerHTML = html;
-          }
-          // Auto refresh every 5 seconds
-          setInterval(getStatus, 5000);
-          // Initial load
-          getStatus();
+          fetch('/api/status').then(r=>r.json()).then(data=>{
+            document.getElementById('stats').innerHTML = \`
+              <p>Status: \${data.running ? 'RUNNING' : 'STOPPED'}</p>
+              <p>Messages Sent: \${data.messagesSent}</p>
+              <p>Last Success: \${new Date(data.lastSuccess).toLocaleString()}</p>
+              <p>Ping Count: \${data.pingCount}</p>
+            \`;
+          });
         </script>
       </body>
     </html>
   `);
 });
 
+app.post('/api/start', (req, res) => {
+  startRawSending();
+  res.json({ success: true, message: 'Bot started' });
+});
+
+app.post('/api/stop', (req, res) => {
+  stopRawSending();
+  res.json({ success: true, message: 'Bot stopped' });
+});
+
+app.get('/api/status', (req, res) => {
+  res.json({
+    running: config.running,
+    messagesSent: messageSendCount,
+    failed: failedAttempts,
+    lastSuccess: lastSuccessTime,
+    lastPing: lastPingTime,
+    pingCount: pingCount,
+    wakeupAttempts: wakeupAttempts,
+    uptime: process.uptime()
+  });
+});
+
+app.get('/api/ping', (req, res) => {
+  lastPingTime = Date.now();
+  pingCount++;
+  res.json({ 
+    pong: true, 
+    time: new Date().toISOString(),
+    pingCount: pingCount
+  });
+});
+
+app.get('/api/wakeup', (req, res) => {
+  lastPingTime = Date.now();
+  lastSuccessTime = Date.now();
+  
+  if (!config.running) {
+    startRawSending();
+  }
+  
+  res.json({ 
+    wakeup: true, 
+    time: new Date().toISOString(),
+    action: config.running ? 'already running' : 'started'
+  });
+});
+
 // ========== SERVER START ==========
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n💎 Server running at http://localhost:${PORT}`);
-  console.log(`🚀 ULTIMATE PROTECTION MODE - Will run forever until manual stop`);
-  console.log(`🔄 AUTO-STARTING IN 3 SECONDS...`);
+  console.log(`🌐 Render URL: ${RENDER_URL}`);
+  console.log(`🏓 Anti-sleep ping system ACTIVE (every 30s internal, 5min external)`);
+  console.log(`⏰ Wake-up detector ACTIVE (checks every minute)`);
+  console.log(`🚀 AUTO-STARTING IN 3 SECONDS...`);
   
   setTimeout(() => {
     startRawSending();
@@ -879,33 +803,11 @@ const server = app.listen(PORT, () => {
 
 wss = new WebSocket.Server({ server });
 
-// ========== GITHUB ACTIONS OPTIMIZATION ==========
-if (process.env.GITHUB_ACTIONS) {
-  console.log('🤖 Running in GitHub Actions - Optimizing for 6-hour runs');
-  
-  // GitHub Actions heartbeat - har minute
-  setInterval(() => {
-    if (config.running) {
-      const stats = {
-        time: new Date().toISOString(),
-        messages: messageSendCount,
-        lastSuccess: lastSuccessTime ? Math.round((Date.now() - lastSuccessTime)/1000) + 's ago' : 'Never',
-        healthySessions: rawManager.getHealthySessions().length,
-        memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB'
-      };
-      console.log(`🤖 GitHub Heartbeat:`, stats);
-    }
-  }, 60000);
-}
-
 // ========== GRACEFUL SHUTDOWN ==========
 process.on('SIGINT', () => {
-  console.log('\n👋 Manual shutdown initiated...');
+  console.log('\n👋 Manual shutdown...');
   stopRawSending();
-  setTimeout(() => {
-    console.log('👋 Goodbye!');
-    process.exit(0);
-  }, 2000);
+  setTimeout(() => process.exit(0), 2000);
 });
 
 process.on('SIGTERM', () => {
@@ -914,32 +816,14 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-// ========== ERROR HANDLING - Never exit ==========
+// ========== ERROR HANDLING - NEVER EXIT ==========
 process.on('uncaughtException', (error) => {
   console.log('🛡️ Uncaught Exception:', error.message);
   console.log(error.stack);
   console.log('🔄 Continuing execution...');
-  // Don't exit
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
   console.log('🛡️ Unhandled Rejection:', reason);
   console.log('🔄 Continuing execution...');
-  // Don't exit
 });
-
-// ========== FINAL CHECK - Har 5 minute ==========
-setInterval(() => {
-  if (config.running) {
-    const now = Date.now();
-    const lastSuccessAgo = Math.round((now - lastSuccessTime) / 1000 / 60); // minutes
-    
-    console.log(`📊 STATUS CHECK - Running: Yes | Last success: ${lastSuccessAgo}m ago | Msgs: ${messageSendCount}`);
-    
-    // Agar 10 minute se koi success nahi to restart
-    if (lastSuccessAgo > 10) {
-      console.log(`🔥 No success for ${lastSuccessAgo} minutes - Force restarting`);
-      process.exit(1);
-    }
-  }
-}, 300000); // Har 5 minute
